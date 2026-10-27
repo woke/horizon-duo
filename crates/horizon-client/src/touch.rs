@@ -102,8 +102,8 @@ impl Movement {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Context {
     pub mode: Mode,
-    /// What the screen shows, as an identity: the screen, its page, the menu behind it. When it
-    /// changes, fingers on the old one do nothing more.
+    /// What the screen shows, as an identity: the screen, its page, the menu behind it, and where
+    /// it is drawn (`Layout::placement`). When it changes, fingers on the old one do nothing more.
     pub scene: u64,
     pub movement: Movement,
     /// The player is flying: Jump goes up and the D-pad's middle down.
@@ -302,7 +302,7 @@ impl Touch {
             (Phase::End, Some(i)) => {
                 let finger = self.fingers.remove(i);
                 match finger.role {
-                    Role::Menu(gesture) => self.lift_menu(gesture, at, here, &mut out),
+                    Role::Menu(gesture) => self.lift_menu(layout, gesture, at, here, &mut out),
                     Role::Function(control) => {
                         self.lift_function(layout, control, at, now, &mut out)
                     }

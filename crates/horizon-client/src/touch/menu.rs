@@ -144,6 +144,10 @@ pub(super) enum Gesture {
     /// between items, so a lift, a cancel or a scene change has nothing to undo, and it never
     /// becomes a drag.
     Painting(Paint),
+    /// A stack held still under an empty hand: half of it is taken where the finger landed if it
+    /// lifts on that slot (the right button's whole click). No button is down until then, so a
+    /// cancel, a scene change or a finger that leaves the slot takes nothing.
+    Splitting { from: [f64; 2], landed: Here },
     /// A stack in hand held still beyond the panel: one item is thrown if the finger lifts
     /// beyond it too. No button is down until then, so a slot the finger crosses or lifts on
     /// gets no click, and a cancel or a scene change throws nothing.
@@ -371,20 +375,12 @@ pub(super) enum Press {
     Carry { origin: SlotSpot, from: [f64; 2] },
     /// The carried stack, spread evenly over the slots the finger crosses (QUICK_CRAFT 0).
     Spread,
-    /// The right button on a stack, under an empty hand: half of it taken (PICKUP 1).
-    Split,
 }
 
 impl Press {
-    fn button(self) -> MouseButton {
-        match self {
-            Press::Split => MouseButton::Right,
-            Press::Plain | Press::Carry { .. } | Press::Spread => MouseButton::Left,
-        }
-    }
     /// Lifting it beyond the panel throws a stack.
     fn throws(self) -> bool {
-        !matches!(self, Press::Plain | Press::Split)
+        !matches!(self, Press::Plain)
     }
 }
 
@@ -392,8 +388,8 @@ impl Press {
 /// everywhere, but a stack in hand goes on a slot one item at a time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Hold {
-    /// The right button goes down on a stack under an empty hand (half of it taken), and comes
-    /// up where the finger lifts.
+    /// Half of a stack under an empty hand, taken if the finger lifts on its slot
+    /// (`Gesture::Splitting`).
     Split,
     /// A click at once.
     Click(MouseButton),
@@ -645,7 +641,7 @@ impl Touch {
                 Drag::Press(press) => {
                     let shifted = self.menus.shift.take(latched);
                     out.push(Input::Pointer(from));
-                    press_down(out, press.button(), shifted, true);
+                    press_down(out, MouseButton::Left, shifted, true);
                     *gesture = Gesture::Pressing {
                         press,
                         shifted,
@@ -686,6 +682,12 @@ impl Touch {
             }
             Gesture::Pressing { press, outside, .. } => {
                 *outside = (press.throws() && here.spot == Spot::Outside).then_some(at);
+            }
+            // A finger that leaves the stack it armed takes nothing.
+            Gesture::Splitting { from, landed }
+                if left(landed, *from, &here, at, layout, false) =>
+            {
+                *gesture = Gesture::Done
             }
             Gesture::Dropping { .. } if !self.context.carrying => *gesture = Gesture::Done,
             Gesture::Dropping { outside } => *outside = (here.spot == Spot::Outside).then_some(at),
@@ -732,6 +734,7 @@ impl Touch {
     /// A menu finger lifts at `at`, over `here`.
     pub(super) fn lift_menu(
         &mut self,
+        layout: &Layout,
         gesture: Gesture,
         at: [f64; 2],
         here: Here,
@@ -746,6 +749,16 @@ impl Touch {
             out.push(Input::Pointer(AWAY));
             return;
         }
+        let gesture = match gesture {
+            // Lifted off the stack it armed, with no move there first: it takes nothing, as a
+            // finger that slid off does.
+            Gesture::Splitting { from, landed }
+                if left(&landed, from, &here, at, layout, false) =>
+            {
+                Gesture::Done
+            }
+            gesture => gesture,
+        };
         let (at, here) = match gesture {
             // A stack in hand put down from a slot's gap goes on the slot the finger landed on,
             // which it never left (`left`).
@@ -757,6 +770,7 @@ impl Touch {
             {
                 (from, landed)
             }
+            Gesture::Splitting { from, landed } => (from, landed),
             _ => (at, here),
         };
         out.push(Input::Pointer(at));
@@ -800,7 +814,14 @@ impl Touch {
                     _ => {}
                 }
             }
-            Gesture::Pressing { press, shifted, .. } => release(out, press.button(), shifted),
+            Gesture::Pressing { shifted, .. } => release(out, MouseButton::Left, shifted),
+            // Half of the stack, as the right button's click takes it (PICKUP 1), or a quick move
+            // of it with the Shift latch.
+            Gesture::Splitting { .. } => {
+                let shifted = self.menus.shift.take(true);
+                press_down(out, MouseButton::Right, shifted, true);
+                release(out, MouseButton::Right, shifted);
+            }
             // The right button's click on slot -999 throws one item. It ignores Shift, so the
             // latch stays for the next click.
             Gesture::Dropping { .. } if here.spot == Spot::Outside => {
@@ -857,16 +878,7 @@ impl Touch {
                         outside: Some(from),
                     }
                 }
-                Hold::Split => {
-                    let shifted = self.menus.shift.take(true);
-                    out.push(Input::Pointer(from));
-                    press_down(out, MouseButton::Right, shifted, true);
-                    *gesture = Gesture::Pressing {
-                        press: Press::Split,
-                        shifted,
-                        outside: None,
-                    };
-                }
+                Hold::Split => *gesture = Gesture::Splitting { from, landed: here },
                 Hold::Click(button) => {
                     out.push(Input::Pointer(from));
                     click(out, button, true);
@@ -887,8 +899,8 @@ impl Touch {
                 self.menus.shift.lift();
                 return;
             }
-            Gesture::Pressing { press, shifted, .. } => {
-                out.push(Input::Abort(press.button()));
+            Gesture::Pressing { shifted, .. } => {
+                out.push(Input::Abort(MouseButton::Left));
                 if shifted {
                     out.push(Input::Shift(false));
                 }

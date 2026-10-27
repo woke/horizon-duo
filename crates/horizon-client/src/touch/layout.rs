@@ -131,6 +131,12 @@ impl Layout {
             unit: (scale_factor * UNIT_PER_POINT).round().max(2.0) as f32,
         }
     }
+    /// Where the controls and the GUI are, as an identity: a resize, another GUI scale or
+    /// another display gives another, which moves what lies under each finger.
+    pub fn placement(&self) -> [u32; 4] {
+        let [width, height] = self.size;
+        [width, height, self.gui, self.unit].map(f32::to_bits)
+    }
     fn u(&self, art: f32) -> f32 {
         art * self.unit
     }
@@ -414,6 +420,19 @@ mod tests {
         let [x, y, side, _] = layout.dpad();
         assert_eq!(layout.cell_at([x + 1.0, y + side - 1.0]), None);
         assert_eq!(layout.cell_at([x + side + 1.0, y]), None);
+    }
+
+    #[test]
+    fn a_resize_or_another_display_is_another_placement() {
+        let duo = Layout::new(2853, 2007, 3.0).placement();
+        assert_eq!(duo, Layout::new(2853, 2007, 3.0).placement());
+        // Narrower, at the same GUI scale.
+        assert_ne!(duo, Layout::new(2622, 2007, 3.0).placement(), "resized");
+        assert_ne!(
+            duo,
+            Layout::new(2853, 2007, 2.0).placement(),
+            "another display"
+        );
     }
 
     #[test]

@@ -706,16 +706,98 @@ const fn right_down() -> Input {
 }
 
 #[test]
-fn a_long_press_on_a_stack_takes_half_with_the_right_button() {
+fn a_long_press_on_a_stack_takes_half_when_it_lifts() {
     let (mut touch, layout, now, held) = long_press(menu(), slot(3));
-    assert_eq!(held, [Input::Pointer(A), right_down()]);
+    assert_eq!(held, [], "no button is down while the finger rests");
+    assert!(tick(&mut touch, now + Duration::from_secs(5)).is_empty());
+    let inside = [A[0] + 30.0, A[1] + 10.0];
+    assert_eq!(
+        touch.on(&layout, event(1, Phase::Move, inside, slot(3)), now),
+        [Input::Pointer(inside)]
+    );
+    assert_eq!(
+        touch.on(&layout, event(1, Phase::End, inside, slot(3)), now),
+        thrown(A),
+        "the right button's whole click where it landed"
+    );
+}
+
+#[test]
+fn a_long_press_on_a_stack_that_leaves_it_takes_nothing() {
+    for (to, over) in [(B, empty(4)), (B, slot(5)), (B, spot(Spot::Outside))] {
+        let (mut touch, layout, now, _) = long_press(menu(), slot(3));
+        touch.on(&layout, event(1, Phase::Move, to, over), now);
+        touch.on(&layout, event(1, Phase::Move, A, slot(3)), now);
+        assert_eq!(
+            touch.on(&layout, event(1, Phase::End, A, slot(3)), now),
+            [Input::Pointer(A), Input::Pointer(AWAY)],
+            "{over:?}"
+        );
+    }
+}
+
+#[test]
+fn a_long_press_on_a_stack_lifted_off_it_takes_nothing() {
+    let gap = [A[0] + 45.0, A[1]];
+    for (to, over) in [
+        (B, empty(4)),
+        (B, slot(5)),
+        (B, spot(Spot::Outside)),
+        (gap, Here::default()),
+    ] {
+        let (mut touch, layout, now, _) = long_press(menu(), slot(3));
+        assert_eq!(
+            touch.on(&layout, event(1, Phase::End, to, over), now),
+            [Input::Pointer(to), Input::Pointer(AWAY)],
+            "{over:?}"
+        );
+    }
+}
+
+#[test]
+fn a_long_press_on_a_stack_cancelled_or_left_behind_takes_nothing() {
+    let (mut touch, layout, now, _) = long_press(menu(), slot(3));
+    assert_eq!(
+        touch.on(&layout, event(1, Phase::Cancel, A, slot(3)), now),
+        [Input::Pointer(AWAY)]
+    );
+    let (mut touch, layout, now, _) = long_press(menu(), slot(3));
+    let next = next_scene(&touch);
+    assert_eq!(touch.frame(next, now), [Input::Pointer(AWAY)]);
+    assert_eq!(
+        touch.touch(&layout, next, event(1, Phase::End, A, slot(3)), now),
+        []
+    );
+}
+
+#[test]
+fn a_long_press_on_a_stack_with_the_latch_quick_moves_it_at_the_lift() {
+    let (mut touch, layout, now) = inventory();
+    tap_shift(&mut touch, &layout, now);
+    let (mut touch, layout, now, held) = long_press((touch, layout, now), slot(3));
+    assert_eq!(held, []);
     assert_eq!(
         touch.on(&layout, event(1, Phase::End, A, slot(3)), now),
         [
             Input::Pointer(A),
+            Input::Shift(true),
+            right_down(),
             Input::Release(RIGHT),
+            Input::Shift(false),
             Input::Pointer(AWAY)
         ]
+    );
+    assert!(!tap_shifted(&mut touch, &layout, 2, slot(3), now));
+}
+
+#[test]
+fn the_ring_of_a_long_press_on_a_stack_stays_full_until_it_lifts() {
+    let (touch, layout, now, _) = long_press(menu(), slot(3));
+    let full = marks_near(&touch, &layout, A, now);
+    assert!(full > 0);
+    assert_eq!(
+        marks_near(&touch, &layout, A, now + Duration::from_secs(5)),
+        full
     );
 }
 

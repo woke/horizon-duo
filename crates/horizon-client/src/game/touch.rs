@@ -349,7 +349,7 @@ impl Game<'_> {
         let slots = self.inventory_open();
         Context {
             mode,
-            scene: super::scene_id(self.scene()),
+            scene: super::scene_id((self.scene(), self.touch_layout().map(|l| l.placement()))),
             movement: self.settings.controller.touch_movement,
             flying: self.player.as_ref().is_some_and(|p| p.flying),
             held_item_used_over_time: self.held_item_used_over_time(),
@@ -688,7 +688,7 @@ impl Loading {
         let event = touch_event(&touch, widget_here(p, scale));
         let context = Context {
             mode: Mode::Title,
-            scene: self.scene(),
+            scene: super::scene_id((self.scene(), layout.placement())),
             ..Context::default()
         };
         let inputs = self.touch.touch(&layout, context, event, Instant::now());
