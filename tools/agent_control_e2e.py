@@ -12,9 +12,9 @@ golden apple, milk, honey, chorus fruit) and checks their effects, remainders an
 pick scenario middle-clicks slots (AbstractContainerScreen's cloning): a full stack in creative, from
 the hotbar and from an item tab, and nothing in survival; the suggestions scenario checks
 slash-command Tab completion on single player's connected client after a fresh launch; the touch
-scenario (CLI only) puts fingers on the inventory: a held stack painted into the crafting grid one
-item at a time, nothing on another item, the result or under a recipe's alternatives (from a finger
-or the mouse), and Escape hiding a recipe book that covers a narrow inventory; the no-ai scenario
+scenario (CLI only) puts fingers on the inventory: a stack in hand held still on the crafting grid
+placed whole only when the finger lifts, nothing on the result or under a recipe's alternatives
+(from a finger or the mouse), and Escape hiding a recipe book that covers a narrow inventory; the no-ai scenario
 turns No AI on in a scratch game home and checks that horizon-ctl, its MCP server and the game's
 control socket all refuse.
 
@@ -594,39 +594,31 @@ def touch_scenario(d, out):
     def count(stack):
         return stack['count'] if stack else 0
 
-    # 1. Three logs held on an empty grid slot go down one at a time while the finger stays: one
-    # log on the slot and two in hand for the 450 ms before the second, then the others.
+    # 1. Three logs held still on an empty grid slot change nothing until the finger lifts: a slow
+    # tap puts the whole stack down.
     tree = widgets(d)
     logs = next(w for w in tree.values() if w.get('stack') == oak(3))
     tap(middle(logs['bounds']))
     assert menu()['hand'] == oak(3), menu()
     grid = slot_at(100)
     finger = down(grid)
-    counts, deadline = [], time.time() + 5
-    while not counts or counts[-1] < 3:
-        assert time.time() < deadline, f'the held finger put down {counts} in 5 s'
-        now = menu()
-        placed = count(now['100'])
-        assert placed + count(now['hand']) == 3 and placed >= (counts or [0])[-1], (counts, now)
-        counts.append(placed)
-    steps = [n for i, n in enumerate(counts) if i == 0 or n != counts[i - 1]]
-    assert 1 in steps, f'no reading had one log down and two in hand before the next: {steps}'
+    time.sleep(1.2)
+    assert menu()['hand'] == oak(3) and menu()['100'] is None, ('the resting finger placed', menu())
     up(finger, grid)
-    painted = {'100': oak(3), '101': None, '200': planks, 'hand': None}
-    assert menu() == painted, menu()
+    placed = {'100': oak(3), '101': None, '200': planks, 'hand': None}
+    assert menu() == placed, menu()
 
-    # 2. Held on another item, or on the result, a stack in hand changes nothing, nor at the lift.
+    # 2. Held on the result, a stack in hand changes nothing, nor at the lift.
     birches = next(w for w in widgets(d).values() if w.get('stack') == birch)
     tap(middle(birches['bounds']))
-    before = dict(painted, hand=birch)
+    before = dict(placed, hand=birch)
     assert menu() == before, menu()
-    for slot in (100, 200):
-        at = slot_at(slot)
-        finger = down(at)
-        time.sleep(1.2)
-        assert menu() == before, (slot, menu())
-        up(finger, at)
-        assert menu() == before, (slot, menu())
+    at = slot_at(200)
+    finger = down(at)
+    time.sleep(1.2)
+    assert menu() == before, menu()
+    up(finger, at)
+    assert menu() == before, menu()
 
     # 3. A long press beyond the panel throws one item only where it lifts beyond the panel:
     # lifted back on the grid, over another item, it changes nothing; lifted beyond, one leaves
@@ -691,7 +683,7 @@ def touch_scenario(d, out):
     state = d('state')
     assert state['screen'] == 'inventory' and state['recipe_book'] == {'presentation': 'closed', 'open': False}, state
     d('close')
-    return {'grid_while_held': steps, 'narrow_gui': width}
+    return {'narrow_gui': width}
 
 
 def suggestions_scenario(d, out):

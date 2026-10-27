@@ -28,7 +28,7 @@ mod menu;
 pub use functions::{Function, Shown};
 use keys::Keys;
 pub use layout::{Button, Cell, Layout};
-pub use menu::{Here, Loupe, MouseButton, PlaceOne, PlaceResult, SlotKind, SlotSpot, Spot};
+pub use menu::{Here, MouseButton, SlotKind, SlotSpot, Spot};
 
 /// A finger held still on the view this long mines, or uses the held item.
 const HOLD: Duration = Duration::from_millis(300);
@@ -114,8 +114,7 @@ pub struct Context {
     pub slots: bool,
     /// F1 hid the HUD: the hotbar's slots answer no taps.
     pub hud_hidden: bool,
-    /// The hand holds a stack over an open inventory: taps place it, holds place one at a
-    /// time, drags spread it.
+    /// The hand holds a stack over an open inventory: taps place it, drags spread it.
     pub carrying: bool,
 }
 
@@ -143,9 +142,6 @@ pub enum Input {
     /// If the hand holds a stack now, a left click at this point (physical pixels): a dragged
     /// stack put down, or what that leaves in hand put back where it came from. Never a result.
     PutDown([f64; 2]),
-    /// One item from the hand into a slot, if the menu says the right click there moves exactly
-    /// that, answered at once (`Touch::placed`).
-    PlaceOne(PlaceOne),
     /// A tap focused a text field: the system keyboard is wanted.
     Keyboard,
     /// Mouse movement turning the view.
@@ -168,8 +164,10 @@ pub enum Input {
 /// What a finger does, decided where it lands.
 #[derive(Clone, Debug)]
 enum Role {
-    /// On the title screen or a menu.
-    Menu(menu::Gesture),
+    /// On the title screen or a menu: what it does is the pointer's (`menu::Pointer`).
+    Menu,
+    /// On the Shift button of an inventory: Shift held while it rests.
+    Shift,
     /// On the D-pad: the square under it, which it may slide to another.
     Pad {
         cell: Option<Cell>,
@@ -279,22 +277,20 @@ impl Touch {
             (Phase::Start, _) => {
                 if let Some(i) = index {
                     let finger = self.fingers.remove(i);
-                    self.release(finger.role, now, &mut out);
+                    self.release(finger, now, &mut out);
                 }
                 self.seen = true;
                 let role = if self.context.mode == Mode::Playing {
                     self.land(layout, at, now, &mut out)
                 } else {
-                    self.land_menu(layout, at, here, now, &mut out)
+                    self.land_menu(layout, id, at, here, now, &mut out)
                 };
                 self.fingers.push(Finger { id, role });
             }
             (Phase::Move, Some(i)) => {
                 let mut role = std::mem::replace(&mut self.fingers[i].role, Role::Spent);
                 match &mut role {
-                    Role::Menu(gesture) => {
-                        self.slide_menu(layout, id, gesture, at, here, now, &mut out)
-                    }
+                    Role::Menu => self.slide_menu(layout, id, at, here, &mut out),
                     role => self.slide(layout, role, at, now, &mut out),
                 }
                 self.fingers[i].role = role;
@@ -302,16 +298,16 @@ impl Touch {
             (Phase::End, Some(i)) => {
                 let finger = self.fingers.remove(i);
                 match finger.role {
-                    Role::Menu(gesture) => self.lift_menu(layout, gesture, at, here, &mut out),
+                    Role::Menu => self.lift_menu(layout, id, at, here, &mut out),
                     Role::Function(control) => {
                         self.lift_function(layout, control, at, now, &mut out)
                     }
-                    role => self.lift(role, now, &mut out),
+                    _ => self.lift(finger, now, &mut out),
                 }
             }
             (Phase::Cancel, Some(i)) => {
                 let finger = self.fingers.remove(i);
-                self.release(finger.role, now, &mut out);
+                self.release(finger, now, &mut out);
             }
             (Phase::Move | Phase::End | Phase::Cancel, None) => {}
         }
@@ -371,12 +367,11 @@ impl Touch {
     /// Every finger does nothing more until it lifts: a button it held down comes up clicking
     /// nothing, and Shift lets go.
     fn spend_fingers(&mut self, now: Instant, out: &mut Vec<Input>) {
+        self.let_go_pointer(out);
         for i in 0..self.fingers.len() {
             let role = std::mem::replace(&mut self.fingers[i].role, Role::Spent);
-            match role {
-                Role::Menu(gesture) => self.let_go(gesture, out),
-                Role::Pad { .. } | Role::Stick { .. } => self.stop_moving(now, out),
-                _ => {}
+            if let Role::Pad { .. } | Role::Stick { .. } = role {
+                self.stop_moving(now, out);
             }
         }
         self.menus.shift = Default::default();
@@ -512,13 +507,18 @@ impl Touch {
                 }
             }
             Role::Hotbar => out.extend(layout.hotbar_slot(px).map(Input::Hotbar)),
-            Role::Menu(_) | Role::Button(_) | Role::Function(_) | Role::Descend | Role::Spent => {}
+            Role::Menu
+            | Role::Shift
+            | Role::Button(_)
+            | Role::Function(_)
+            | Role::Descend
+            | Role::Spent => {}
         }
     }
 
     /// A finger leaves the screen where it was.
-    fn lift(&mut self, role: Role, now: Instant, out: &mut Vec<Input>) {
-        match role {
+    fn lift(&mut self, finger: Finger, now: Instant, out: &mut Vec<Input>) {
+        match finger.role {
             // A tap clicks use or attack, which another finger may be holding down.
             Role::Look {
                 landed,
@@ -531,7 +531,7 @@ impl Touch {
             {
                 out.push(Input::Tap);
             }
-            role => self.release(role, now, out),
+            _ => self.release(finger, now, out),
         }
     }
 
@@ -545,10 +545,11 @@ impl Touch {
         }
     }
 
-    /// Let go of what a lifted finger held down, once no other finger holds it.
-    fn release(&mut self, role: Role, now: Instant, out: &mut Vec<Input>) {
-        match role {
-            Role::Menu(gesture) => self.let_go(gesture, out),
+    /// Let go of what a lifted or cancelled finger held down, once no other finger holds it.
+    fn release(&mut self, finger: Finger, now: Instant, out: &mut Vec<Input>) {
+        match finger.role {
+            Role::Menu => self.cancel_menu(finger.id, out),
+            Role::Shift => self.menus.shift.lift(),
             Role::Pad { .. } | Role::Stick { .. } => self.stop_moving(now, out),
             role => {
                 if let Some(mapping) = role.holds().filter(|m| !self.fingers_hold(m)) {

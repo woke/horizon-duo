@@ -406,7 +406,7 @@ pub fn book_pages(stack: &ItemStack) -> usize {
 
 /// Exactly one item went from the hand (`carried`, now `left`) into a slot (`was`, now `now`),
 /// the same item with the same components on both sides.
-pub fn moved_one(
+fn moved_one(
     carried: &ItemStack,
     left: Option<&ItemStack>,
     was: Option<&ItemStack>,

@@ -9,8 +9,8 @@ use horizon_client::{
     hud::HudBatch,
     keymapping::{SNEAK, SPRINT},
     touch::{
-        self as fingers, Context, Function, Here, Input, Layout, Mode, Phase, PlaceOne,
-        PlaceResult, SlotKind, SlotSpot, Spot, TouchEvent,
+        self as fingers, Context, Function, Here, Input, Layout, Mode, Phase, SlotKind, SlotSpot,
+        Spot, TouchEvent,
     },
     widgets::{self, Kind},
 };
@@ -128,15 +128,7 @@ impl Game<'_> {
             return;
         };
         let here = if self.pad_in_menu() {
-            let mut here = self.touch_here([touch.location.x, touch.location.y]);
-            // Only a landing finger's hold reads it, so a sliding one never dry-runs a click.
-            if touch.phase == TouchPhase::Started
-                && let Spot::Slot(s) = &mut here.spot
-                && s.kind == SlotKind::Normal
-            {
-                s.takes_one = self.would_place_one(s.id as usize);
-            }
-            here
+            self.touch_here([touch.location.x, touch.location.y])
         } else {
             Here::default()
         };
@@ -180,7 +172,6 @@ impl Game<'_> {
                     id: TRASH,
                     filled: false,
                     kind: SlotKind::Trash,
-                    takes_one: false,
                 }));
             }
             if self.creative_screen.inside_scrollbar(p.0 - ox, p.1 - oy) {
@@ -191,7 +182,7 @@ impl Game<'_> {
             return Some(Spot::Secondary);
         }
         // The book takes every press, beyond the panel too: no slot, so a tap only reaches the
-        // book, and a stack in hand paints nothing under it.
+        // book.
         if self.recipe_book_takes_pointer() {
             return None;
         }
@@ -208,28 +199,7 @@ impl Game<'_> {
             id: id as u32,
             filled,
             kind,
-            takes_one: false,
         }))
-    }
-
-    /// Whether the mouse's plain right click on slot `slot` would move exactly one item from
-    /// the hand into it: the menu engine's own click, run on a copy. Not shifted, not inside a
-    /// drag of the mouse's, not one Mouse Tweaks takes over; false with an empty hand.
-    fn would_place_one(&mut self, slot: usize) -> bool {
-        if self.carried.is_none()
-            || self.has_shift_down()
-            || self.inv.drag.is_some()
-            || self.inv.clicks.quick_crafting().is_some()
-            || self.tweaks_on()
-        {
-            return false;
-        }
-        let mut takes = false;
-        self.menu_session(|menu, env, to_menu| {
-            takes = to_menu(slot).is_some_and(|s| menu.would_place_one(env, s));
-            Some(false)
-        });
-        takes
     }
 
     /// The mouse's `button` clicked at `at` (physical pixels): moved there, pressed and released.
@@ -272,57 +242,6 @@ impl Game<'_> {
         }
         self.inv.last_click = None;
         self.touch_click(event_loop, id, device_id, at, MouseButton::Left);
-    }
-
-    /// A painting finger's one item into the slot it aims at: the mouse's right click at its
-    /// point (physical pixels), sent only when that slot is still under it and the click moves
-    /// exactly one item from the hand into that slot (`would_place_one`), and then read back. On
-    /// every path the click changes the hand at once: the server's copy is predicted
-    /// (`remote_menu_ops`).
-    fn inventory_place_one(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        id: WindowId,
-        device_id: DeviceId,
-        place: PlaceOne,
-    ) -> PlaceResult {
-        let (Some(batch), Some(carried)) = (self.gui_scale(), self.carried.clone()) else {
-            return PlaceResult::Ended;
-        };
-        if !self.inventory_open() {
-            return PlaceResult::Ended;
-        }
-        if self.recipe_book_takes_pointer() {
-            return PlaceResult::Blocked;
-        }
-        // A window resized, folded or unfolded since the finger aimed moves the slots under it.
-        let (at, slot) = (place.at, place.slot as usize);
-        let under = self.slot_at(
-            &batch,
-            at[0] as f32 / batch.scale,
-            at[1] as f32 / batch.scale,
-        );
-        if under != Some(slot) {
-            return PlaceResult::Ended;
-        }
-        if !self.would_place_one(slot) {
-            return PlaceResult::Blocked;
-        }
-        let was = self.slot_view(slot);
-        self.inv.last_click = None;
-        self.touch_click(event_loop, id, device_id, at, MouseButton::Right);
-        let now = self.slot_view(slot);
-        let moved = horizon_client::menu::moved_one(
-            &carried,
-            self.carried.as_ref(),
-            was.as_ref(),
-            now.as_ref(),
-        );
-        if moved && self.carried.is_some() {
-            PlaceResult::Placed
-        } else {
-            PlaceResult::Ended
-        }
     }
 
     /// Where the carried stack is drawn (`draw_carried`): under the pointer, or, while a touch
@@ -394,18 +313,6 @@ impl Game<'_> {
         let mut changed = false;
         for input in inputs {
             let input = match input {
-                // Answered at once, also when it can't be placed: then the finger paints no
-                // more.
-                Input::PlaceOne(place) => {
-                    let result = if busy || changed {
-                        PlaceResult::Ended
-                    } else {
-                        self.inventory_place_one(event_loop, id, device_id, place)
-                    };
-                    self.touch.placed(place.finger, result);
-                    changed |= self.scene() != before;
-                    continue;
-                }
                 Input::Release(button) if changed => Input::Abort(button),
                 Input::Press { .. } | Input::PutDown(_) | Input::Wheel(_) | Input::Function(_)
                     if changed =>
@@ -472,8 +379,6 @@ impl Game<'_> {
                     self.inventory_put_down(event_loop, id, device_id, at);
                     Ok(())
                 }
-                // Answered before the filters above.
-                Input::PlaceOne(_) => Ok(()),
                 Input::Shift(down) => {
                     self.touch_shift(down);
                     Ok(())
@@ -620,22 +525,7 @@ impl Game<'_> {
             let sneaking = self.toggles.is_down(SNEAK);
             self.touch
                 .draw(batch, &self.gui.atlas, &layout, sneaking, Instant::now());
-            self.draw_paint_loupe(batch, &layout);
         }
-    }
-
-    /// While a finger puts items on a slot one at a time, that slot's stack with its count on
-    /// the plate above the fingertip: the finger covers the slot itself.
-    fn draw_paint_loupe(&mut self, batch: &mut HudBatch, layout: &Layout) {
-        let Some(loupe) = self.touch.loupe(layout) else {
-            return;
-        };
-        let Some(stack) = self.slot_view(loupe.slot as usize) else {
-            return;
-        };
-        let [left, top, side, _] = loupe.square.map(|v| v / batch.scale);
-        let corner = (side - 16.0) / 2.0;
-        self.draw_item(batch, &stack, left + corner, top + corner);
     }
 
     /// `horizon-ctl touch ...`: a finger as the screen reports one, in GUI pixels.
@@ -701,7 +591,6 @@ impl Loading {
                 }
                 Input::Wheel(lines) => self.menu_wheel(lines),
                 Input::Keyboard => self.request_keyboard(),
-                Input::PlaceOne(place) => self.touch.placed(place.finger, PlaceResult::Ended),
                 // Nothing of a world or an inventory is on the title screen.
                 Input::Shift(_)
                 | Input::PutDown(_)

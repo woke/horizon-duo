@@ -4,21 +4,16 @@
 //! would send (`Input`).
 
 use super::layout::{Button, Layout};
-use super::{AWAY, DOUBLE_TAP, Finger, Input, Mode, Role, Touch};
+use super::{AWAY, DOUBLE_TAP, Input, Mode, Role, Touch};
 use std::time::{Duration, Instant};
 
 /// A menu finger held still this long is the right button. Longer than play's hold, which
 /// splits a stack under a finger resting to read its tooltip: half a second, iOS's own long
 /// press.
 pub(super) const MENU_HOLD: Duration = Duration::from_millis(500);
-/// With a stack in hand, a finger held still on a slot this long puts one item there. No
-/// tooltip shows while carrying (`draw_slot_tooltip`), so only a slow tap is at stake.
-pub(super) const PAINT_HOLD: Duration = Duration::from_millis(250);
-/// Still resting on that slot, the next item comes this long after the first, so a finger
-/// sliding across slots gives each one item...
-pub(super) const PAINT_DWELL: Duration = Duration::from_millis(450);
-/// ...and then one more every this long.
-pub(super) const PAINT_REPEAT: Duration = Duration::from_millis(200);
+/// With a stack in hand, a finger held this long on a result, a creative copy or the trash is
+/// done: lifting it clicks nothing there, where a click would craft, copy or destroy.
+pub(super) const INERT_HOLD: Duration = Duration::from_millis(250);
 
 /// What the game shows under a finger, told afresh with every touch event in a menu. The
 /// landing one decides the gesture; later ones say where a drag is.
@@ -53,10 +48,6 @@ pub struct SlotSpot {
     pub id: u32,
     pub filled: bool,
     pub kind: SlotKind,
-    /// With a stack in hand, the right click here would put exactly one item in, as the game's
-    /// menu says; false with an empty hand. Told only with the landing event, whose hold ring
-    /// reads it: false on later ones.
-    pub takes_one: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,39 +69,6 @@ pub enum MouseButton {
     Right,
     /// The pick block button: a full copy in creative (CLONE).
     Middle,
-}
-
-/// Finger `finger` puts one item from the hand into slot `slot`: the mouse's right click at
-/// `at` (physical pixels), which the game sends only if `slot` is still there and its menu says
-/// the click moves exactly that one item. The game answers at once with `Touch::placed`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PlaceOne {
-    pub finger: u64,
-    pub slot: u32,
-    pub at: [f64; 2],
-}
-
-/// While a finger paints slot `slot`: the square above the fingertip, in physical pixels, where
-/// the game shows the slot's stack, which the finger covers.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Loupe {
-    pub slot: u32,
-    pub square: [f32; 4],
-}
-
-/// The loupe's side in GUI pixels: an item and its count.
-const LOUPE: f32 = 18.0;
-
-/// What the game did with a `PlaceOne`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlaceResult {
-    /// The item went in, and the hand holds more.
-    Placed,
-    /// The slot takes none of it (another item, a full stack, a slot that refuses it): nothing
-    /// was clicked.
-    Blocked,
-    /// No more: the hand ran out, the screen changed, or the click did something else.
-    Ended,
 }
 
 /// What a finger on a menu is doing, from landing to lifting.
@@ -140,10 +98,6 @@ pub(super) enum Gesture {
         rest: f64,
         line: f32,
     },
-    /// A stack in hand put down one item at a time (`Input::PlaceOne`). No button is down
-    /// between items, so a lift, a cancel or a scene change has nothing to undo, and it never
-    /// becomes a drag.
-    Painting(Paint),
     /// A stack held still under an empty hand: half of it is taken where the finger landed if it
     /// lifts on that slot (the right button's whole click). No button is down until then, so a
     /// cancel, a scene change or a finger that leaves the slot takes nothing.
@@ -157,212 +111,6 @@ pub(super) enum Gesture {
     },
     /// A long press clicked already, or did all it will: lifting only hovers away.
     Done,
-    /// On the Shift button.
-    Shift,
-}
-
-impl Gesture {
-    /// The finger is the mouse pointer: anything but the Shift button.
-    fn points(&self) -> bool {
-        !matches!(self, Gesture::Shift)
-    }
-}
-
-/// A painting finger: the first item where it held still, one on each slot it slides onto for
-/// the first time, more while it rests on one.
-#[derive(Clone, Debug)]
-pub(super) struct Paint {
-    /// Where the finger is: the ring follows it.
-    at: [f64; 2],
-    aim: Aim,
-    /// The slots this stroke reached, and whether each took an item. One that did takes the
-    /// next only after a dwell; one that took none is passed over.
-    visited: Vec<(u32, bool)>,
-}
-
-/// The slot a painting finger puts items on, at `point`: inside it, where the finger entered,
-/// so a fingertip rolling into a gap still clicks the slot.
-#[derive(Clone, Copy, Debug)]
-enum Aim {
-    /// Nothing to paint: beyond the panel, or a slot's pitch of background from the last slot.
-    Off,
-    /// A `PlaceOne` went out at `sent`. If its item lands, the next waits `then`.
-    Asked {
-        slot: u32,
-        point: [f64; 2],
-        sent: Instant,
-        then: Duration,
-    },
-    /// The next item goes at `next`; the ring fills from `since`.
-    Due {
-        slot: u32,
-        point: [f64; 2],
-        since: Instant,
-        next: Instant,
-    },
-    /// The slot takes none: no ring, no click.
-    Refused { slot: u32 },
-}
-
-impl Aim {
-    fn slot(self) -> Option<u32> {
-        match self {
-            Aim::Off => None,
-            Aim::Asked { slot, .. } | Aim::Due { slot, .. } | Aim::Refused { slot } => Some(slot),
-        }
-    }
-}
-
-impl Paint {
-    /// Finger `finger` held still on `slot`, at `point`: the first item, now.
-    fn start(finger: u64, slot: u32, point: [f64; 2], now: Instant, out: &mut Vec<Input>) -> Self {
-        let mut paint = Paint {
-            at: point,
-            aim: Aim::Off,
-            visited: Vec::new(),
-        };
-        paint.ask(finger, slot, point, now, PAINT_DWELL, out);
-        paint
-    }
-
-    fn ask(
-        &mut self,
-        finger: u64,
-        slot: u32,
-        point: [f64; 2],
-        now: Instant,
-        then: Duration,
-        out: &mut Vec<Input>,
-    ) {
-        out.push(Input::PlaceOne(PlaceOne {
-            finger,
-            slot,
-            at: point,
-        }));
-        self.aim = Aim::Asked {
-            slot,
-            point,
-            sent: now,
-            then,
-        };
-    }
-
-    /// The finger moved to `at`, over `here`. Another slot is aimed at once: a new one gets an
-    /// item, a visited one waits for the dwell. A gap keeps the slot.
-    fn slide(
-        &mut self,
-        finger: u64,
-        at: [f64; 2],
-        here: &Here,
-        layout: &Layout,
-        now: Instant,
-        out: &mut Vec<Input>,
-    ) {
-        self.at = at;
-        if let Aim::Asked { .. } = self.aim {
-            return;
-        }
-        match here.spot {
-            Spot::Slot(s) if Some(s.id) == self.aim.slot() => {}
-            Spot::Slot(s) if s.kind != SlotKind::Normal => self.aim = Aim::Refused { slot: s.id },
-            Spot::Slot(s) => match self.visited.iter().find(|(slot, _)| *slot == s.id) {
-                None => self.ask(finger, s.id, at, now, PAINT_DWELL, out),
-                Some((_, true)) => {
-                    self.aim = Aim::Due {
-                        slot: s.id,
-                        point: at,
-                        since: now,
-                        next: now + PAINT_DWELL,
-                    }
-                }
-                Some((_, false)) => self.aim = Aim::Refused { slot: s.id },
-            },
-            Spot::Outside => self.aim = Aim::Off,
-            _ => {
-                let point = match self.aim {
-                    Aim::Due { point, .. } => point,
-                    _ => return,
-                };
-                let away = ((at[0] - point[0]) as f32).hypot((at[1] - point[1]) as f32);
-                if away > SLOT_PITCH * layout.gui {
-                    self.aim = Aim::Off;
-                }
-            }
-        }
-    }
-
-    /// Once a frame: the next item, if its time has come. A late frame sends one, never a
-    /// burst to catch up.
-    fn due(&mut self, finger: u64, now: Instant, out: &mut Vec<Input>) {
-        if let Aim::Due {
-            slot, point, next, ..
-        } = self.aim
-            && now >= next
-        {
-            self.ask(finger, slot, point, now, PAINT_REPEAT, out);
-        }
-    }
-
-    /// The game's answer to the `PlaceOne` out. False: the painting is over.
-    fn placed(&mut self, result: PlaceResult) -> bool {
-        let Aim::Asked {
-            slot,
-            point,
-            sent,
-            then,
-        } = self.aim
-        else {
-            return true;
-        };
-        let took = match result {
-            PlaceResult::Placed => true,
-            PlaceResult::Blocked => false,
-            PlaceResult::Ended => return false,
-        };
-        match self.visited.iter_mut().find(|(s, _)| *s == slot) {
-            Some(visit) => visit.1 = took,
-            None => self.visited.push((slot, took)),
-        }
-        self.aim = if took {
-            Aim::Due {
-                slot,
-                point,
-                since: sent,
-                next: sent + then,
-            }
-        } else {
-            Aim::Refused { slot }
-        };
-        true
-    }
-
-    /// The loupe over the finger while an item is to come: as big as `Layout::above`'s square, or
-    /// an item's, whichever is larger, on the same spot.
-    pub(super) fn loupe(&self, layout: &Layout) -> Option<Loupe> {
-        let Aim::Due { slot, .. } = self.aim else {
-            return None;
-        };
-        let [x, y, w, h] = layout.above([self.at[0] as f32, self.at[1] as f32]);
-        let side = w.max(LOUPE * layout.gui);
-        let square = [
-            (x + (w - side) / 2.0).max(0.0),
-            (y + h - side).max(0.0),
-            side,
-            side,
-        ];
-        Some(Loupe { slot, square })
-    }
-
-    /// The ring toward the next item: around the finger, `held` of `wait` filled. None while
-    /// no item is to come.
-    pub(super) fn ring(&self, now: Instant) -> Option<([f64; 2], Duration, Duration)> {
-        match self.aim {
-            Aim::Due { since, next, .. } => {
-                Some((self.at, now.duration_since(since), next - since))
-            }
-            _ => None,
-        }
-    }
 }
 
 /// What a menu finger's button is down for.
@@ -385,7 +133,7 @@ impl Press {
 }
 
 /// What holding a pending finger still for `hold_time` does: the mouse's right button, one rule
-/// everywhere, but a stack in hand goes on a slot one item at a time.
+/// everywhere.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Hold {
     /// Half of a stack under an empty hand, taken if the finger lifts on its slot
@@ -393,8 +141,6 @@ pub(super) enum Hold {
     Split,
     /// A click at once.
     Click(MouseButton),
-    /// One item from the hand on this slot, then more (`Gesture::Painting`).
-    Paint(u32),
     /// One item from the hand thrown if the finger lifts beyond the panel (`Gesture::Dropping`).
     Drop,
     /// Nothing, and no tap at the lift either: a stack in hand held on a slot nothing goes on,
@@ -404,13 +150,12 @@ pub(super) enum Hold {
     Nothing,
 }
 
-/// What a hold on where the finger landed does, `carrying` a stack or not. Shift held or
-/// latched keeps a carried finger's shifted tap: it paints nothing.
-pub(super) fn hold(landed: &Here, carrying: bool, shifted: bool) -> Hold {
+/// What a hold on where the finger landed does, `carrying` a stack or not. A stack in hand held
+/// on a slot is still a tap.
+pub(super) fn hold(landed: &Here, carrying: bool) -> Hold {
     match landed.spot {
         Spot::Slot(s) if carrying => match s.kind {
-            SlotKind::Normal if shifted => Hold::Nothing,
-            SlotKind::Normal => Hold::Paint(s.id),
+            SlotKind::Normal => Hold::Nothing,
             SlotKind::Result | SlotKind::Display | SlotKind::Trash => Hold::Done,
         },
         Spot::Outside if carrying => Hold::Drop,
@@ -428,20 +173,16 @@ pub(super) fn hold(landed: &Here, carrying: bool, shifted: bool) -> Hold {
 }
 
 /// Whether a ring fills toward what a hold where the finger landed does: never where it does
-/// nothing, and with a stack in hand only where an item will land.
-pub(super) fn hold_rings(landed: &Here, carrying: bool, shifted: bool) -> bool {
-    match hold(landed, carrying, shifted) {
-        Hold::Nothing | Hold::Done => false,
-        Hold::Paint(_) => matches!(landed.spot, Spot::Slot(s) if s.takes_one),
-        Hold::Split | Hold::Click(_) | Hold::Drop => true,
-    }
+/// nothing.
+pub(super) fn hold_rings(landed: &Here, carrying: bool) -> bool {
+    !matches!(hold(landed, carrying), Hold::Nothing | Hold::Done)
 }
 
-/// How long a finger holds still before its hold acts: `PAINT_HOLD` for a stack in hand on a
-/// slot, `MENU_HOLD` elsewhere.
+/// How long a finger holds still before its hold acts: `INERT_HOLD` where it does nothing at
+/// all, `MENU_HOLD` elsewhere.
 pub(super) fn hold_time(landed: &Here, carrying: bool) -> Duration {
-    if carrying && matches!(landed.spot, Spot::Slot(_)) {
-        PAINT_HOLD
+    if hold(landed, carrying) == Hold::Done {
+        INERT_HOLD
     } else {
         MENU_HOLD
     }
@@ -556,7 +297,7 @@ impl ShiftKey {
         self.tapped = Some(now);
         self.held = true;
     }
-    fn lift(&mut self) {
+    pub(super) fn lift(&mut self) {
         self.held = false;
     }
     pub(super) fn active(&self) -> bool {
@@ -578,10 +319,11 @@ impl ShiftKey {
 }
 
 impl Touch {
-    /// A finger lands on the title screen or a menu.
+    /// Finger `finger` lands on the title screen or a menu.
     pub(super) fn land_menu(
         &mut self,
         layout: &Layout,
+        finger: u64,
         at: [f64; 2],
         here: Here,
         now: Instant,
@@ -594,20 +336,23 @@ impl Touch {
         }
         if self.context.slots && layout.on(Button::Shift, px) {
             self.menus.shift.tap(now);
-            return Role::Menu(Gesture::Shift);
+            return Role::Shift;
         }
         // A desk has one mouse.
-        let pointing = |f: &Finger| matches!(&f.role, Role::Menu(g) if g.points());
-        if self.fingers.iter().any(pointing) {
+        if !matches!(self.menus.pointer, Pointer::Idle) {
             return Role::Spent;
         }
         out.push(Input::Pointer(at));
-        Role::Menu(Gesture::Pending {
-            landed: now,
-            from: at,
-            here,
-            held: false,
-        })
+        self.menus.pointer = Pointer::Single {
+            finger,
+            gesture: Gesture::Pending {
+                landed: now,
+                from: at,
+                here,
+                held: false,
+            },
+        };
+        Role::Menu
     }
 
     /// Menu finger `finger` moves to `at`, over `here`.
@@ -615,10 +360,28 @@ impl Touch {
         &mut self,
         layout: &Layout,
         finger: u64,
+        at: [f64; 2],
+        here: Here,
+        out: &mut Vec<Input>,
+    ) {
+        let mut pointer = std::mem::take(&mut self.menus.pointer);
+        if let Pointer::Single {
+            finger: pointing,
+            gesture,
+        } = &mut pointer
+            && *pointing == finger
+        {
+            self.slide_gesture(layout, gesture, at, here, out);
+        }
+        self.menus.pointer = pointer;
+    }
+
+    fn slide_gesture(
+        &mut self,
+        layout: &Layout,
         gesture: &mut Gesture,
         at: [f64; 2],
         here: Here,
-        now: Instant,
         out: &mut Vec<Input>,
     ) {
         if let Gesture::Pending {
@@ -661,7 +424,6 @@ impl Touch {
             }
         }
         match gesture {
-            Gesture::Shift => return,
             Gesture::Scrolling {
                 from,
                 last,
@@ -691,48 +453,34 @@ impl Touch {
             }
             Gesture::Dropping { .. } if !self.context.carrying => *gesture = Gesture::Done,
             Gesture::Dropping { outside } => *outside = (here.spot == Spot::Outside).then_some(at),
-            Gesture::Painting(_) if self.paint_stops() => *gesture = Gesture::Done,
-            Gesture::Painting(paint) => paint.slide(finger, at, &here, layout, now, out),
             _ => {}
         }
         out.push(Input::Pointer(at));
-    }
-
-    /// A painting finger puts no more down: the hand ran out, or Shift went down, which would
-    /// make the next click a quick move.
-    fn paint_stops(&self) -> bool {
-        !self.context.carrying || self.menus.shift.active()
-    }
-
-    /// The game's answer to finger `finger`'s `PlaceOne`, given before the next event or frame.
-    /// An answer to no question does nothing.
-    pub fn placed(&mut self, finger: u64, result: PlaceResult) {
-        let Some(f) = self.fingers.iter_mut().find(|f| f.id == finger) else {
-            return;
-        };
-        if let Role::Menu(gesture) = &mut f.role
-            && let Gesture::Painting(paint) = gesture
-            && !paint.placed(result)
-        {
-            *gesture = Gesture::Done;
-        }
-    }
-
-    /// Where the slot a finger paints is shown, if one does.
-    pub fn loupe(&self, layout: &Layout) -> Option<Loupe> {
-        self.fingers.iter().find_map(|f| match &f.role {
-            Role::Menu(Gesture::Painting(paint)) => paint.loupe(layout),
-            _ => None,
-        })
     }
 
     /// Whether a click on `here` is shifted, as the Shift button stands.
     fn shift_for(&mut self, here: &Here) -> bool {
         self.menus.shift.take(!trash(here))
     }
-
-    /// A menu finger lifts at `at`, over `here`.
+    /// Menu finger `finger` lifts at `at`, over `here`.
     pub(super) fn lift_menu(
+        &mut self,
+        layout: &Layout,
+        finger: u64,
+        at: [f64; 2],
+        here: Here,
+        out: &mut Vec<Input>,
+    ) {
+        match std::mem::take(&mut self.menus.pointer) {
+            Pointer::Single {
+                finger: pointing,
+                gesture,
+            } if pointing == finger => self.lift_gesture(layout, gesture, at, here, out),
+            pointer => self.menus.pointer = pointer,
+        }
+    }
+
+    fn lift_gesture(
         &mut self,
         layout: &Layout,
         gesture: Gesture,
@@ -740,10 +488,6 @@ impl Touch {
         here: Here,
         out: &mut Vec<Input>,
     ) {
-        if let Gesture::Shift = gesture {
-            self.menus.shift.lift();
-            return;
-        }
         self.menus.rest = Some(at);
         if let Gesture::Scrolling { .. } = gesture {
             out.push(Input::Pointer(AWAY));
@@ -828,99 +572,76 @@ impl Touch {
                 click(out, MouseButton::Right, true)
             }
             Gesture::Dropping { .. } => {}
-            // Every item already landed: the lift only hovers away.
-            Gesture::Painting(_) | Gesture::Scrolling { .. } | Gesture::Done | Gesture::Shift => {}
+            Gesture::Scrolling { .. } | Gesture::Done => {}
         }
         out.push(Input::Pointer(AWAY));
     }
-
-    /// Once a frame: the menu finger held still long enough does what a hold does, and a
-    /// painting finger puts its next item down when that is due.
+    /// Once a frame: the pointer held still long enough does what a hold does.
     pub(super) fn menu_holds(&mut self, now: Instant, out: &mut Vec<Input>) {
-        let stops = self.paint_stops();
-        let (carrying, shifted) = (self.context.carrying, self.menus.shift.active());
-        for finger in &mut self.fingers {
-            let Role::Menu(gesture) = &mut finger.role else {
-                continue;
-            };
-            if let Gesture::Painting(paint) = gesture {
-                if stops {
-                    *gesture = Gesture::Done;
-                } else {
-                    paint.due(finger.id, now, out);
+        let carrying = self.context.carrying;
+        let Pointer::Single { gesture, .. } = &mut self.menus.pointer else {
+            return;
+        };
+        // An armed drop whose hand ran out throws nothing, and stops showing that it would.
+        if matches!(gesture, Gesture::Dropping { .. }) && !carrying {
+            *gesture = Gesture::Done;
+            return;
+        }
+        let Gesture::Pending {
+            landed,
+            from,
+            here,
+            held: held @ false,
+        } = gesture
+        else {
+            return;
+        };
+        if now.duration_since(*landed) < hold_time(here, carrying) {
+            return;
+        }
+        let (from, here) = (*from, *here);
+        match hold(&here, carrying) {
+            Hold::Drop => {
+                *gesture = Gesture::Dropping {
+                    outside: Some(from),
                 }
-                continue;
             }
-            // An armed drop whose hand ran out throws nothing, and stops showing that it would.
-            if matches!(gesture, Gesture::Dropping { .. }) && !carrying {
+            Hold::Split => *gesture = Gesture::Splitting { from, landed: here },
+            Hold::Click(button) => {
+                out.push(Input::Pointer(from));
+                click(out, button, true);
                 *gesture = Gesture::Done;
-                continue;
             }
-            let Gesture::Pending {
-                landed,
-                from,
-                here,
-                held: held @ false,
-            } = gesture
-            else {
-                continue;
-            };
-            if now.duration_since(*landed) < hold_time(here, carrying) {
-                continue;
-            }
-            let (from, here) = (*from, *here);
-            match hold(&here, carrying, shifted) {
-                Hold::Paint(slot) => {
-                    *gesture = Gesture::Painting(Paint::start(finger.id, slot, from, now, out));
-                }
-                Hold::Drop => {
-                    *gesture = Gesture::Dropping {
-                        outside: Some(from),
-                    }
-                }
-                Hold::Split => *gesture = Gesture::Splitting { from, landed: here },
-                Hold::Click(button) => {
-                    out.push(Input::Pointer(from));
-                    click(out, button, true);
-                    *gesture = Gesture::Done;
-                }
-                Hold::Done => *gesture = Gesture::Done,
-                Hold::Nothing => *held = true,
-            }
+            Hold::Done => *gesture = Gesture::Done,
+            Hold::Nothing => *held = true,
         }
     }
 
-    /// Let go of what a menu finger holds without acting: a cancelled touch, or a scene that
-    /// changed under it. Its button comes up where the finger was, clicking nothing, so a slider
-    /// keeps what the drag gave it; then nothing hovers.
-    pub(super) fn let_go(&mut self, gesture: Gesture, out: &mut Vec<Input>) {
-        match gesture {
-            Gesture::Shift => {
-                self.menus.shift.lift();
-                return;
-            }
-            Gesture::Pressing { shifted, .. } => {
-                out.push(Input::Abort(MouseButton::Left));
-                if shifted {
-                    out.push(Input::Shift(false));
-                }
-            }
-            _ => {}
+    /// Menu finger `finger` cancelled: the system took the touch.
+    pub(super) fn cancel_menu(&mut self, finger: u64, out: &mut Vec<Input>) {
+        match std::mem::take(&mut self.menus.pointer) {
+            Pointer::Single {
+                finger: pointing,
+                gesture,
+            } if pointing == finger => let_go(gesture, out),
+            pointer => self.menus.pointer = pointer,
         }
-        out.push(Input::Pointer(AWAY));
+    }
+
+    /// The pointer lets go of what its finger does: the scene changed under it.
+    pub(super) fn let_go_pointer(&mut self, out: &mut Vec<Input>) {
+        if let Pointer::Single { gesture, .. } = std::mem::take(&mut self.menus.pointer) {
+            let_go(gesture, out);
+        }
     }
 
     /// The physical pixels tooltips keep clear above the pointer: a fingertip while a finger is
     /// on a menu, none for a mouse.
     pub fn tooltip_lift(&self, layout: &Layout) -> f32 {
-        let pointing = self
-            .fingers
-            .iter()
-            .any(|f| matches!(&f.role, Role::Menu(g) if g.points()));
-        if pointing {
-            layout.finger_clearance()
-        } else {
+        if matches!(self.menus.pointer, Pointer::Idle) {
             0.0
+        } else {
+            layout.finger_clearance()
         }
     }
 
@@ -928,6 +649,19 @@ impl Touch {
     pub fn rest(&self) -> Option<[f64; 2]> {
         self.menus.rest
     }
+}
+
+/// Let go of what a menu finger does without acting: a cancelled touch, or a scene that changed
+/// under it. Its button comes up where the finger was, clicking nothing, so a slider keeps what
+/// the drag gave it; then nothing hovers.
+fn let_go(gesture: Gesture, out: &mut Vec<Input>) {
+    if let Gesture::Pressing { shifted, .. } = gesture {
+        out.push(Input::Abort(MouseButton::Left));
+        if shifted {
+            out.push(Input::Shift(false));
+        }
+    }
+    out.push(Input::Pointer(AWAY));
 }
 
 /// Creative's trash slot, which the Shift latch never reaches.
@@ -955,8 +689,21 @@ fn release(out: &mut Vec<Input>, button: MouseButton, shifted: bool) {
 #[derive(Debug, Default)]
 pub(super) struct Menus {
     pub(super) shift: ShiftKey,
+    pub(super) pointer: Pointer,
     /// Where the last menu finger lifted.
     rest: Option<[f64; 2]>,
+}
+
+/// The menu fingers that are the mouse, and what they do. One finger at a time, as a desk has one
+/// mouse: a finger it doesn't follow does nothing until it lifts.
+#[derive(Debug, Default)]
+pub(super) enum Pointer {
+    #[default]
+    Idle,
+    Single {
+        finger: u64,
+        gesture: Gesture,
+    },
 }
 
 #[cfg(test)]

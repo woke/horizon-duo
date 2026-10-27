@@ -4,7 +4,7 @@
 
 use super::functions::Control;
 use super::layout::{Button, Cell, KNOB, Layout, Rect};
-use super::menu::{Gesture, Latch, MENU_HOLD, hold_rings, hold_time};
+use super::menu::{Gesture, Latch, MENU_HOLD, Pointer, hold_rings, hold_time};
 use super::{HOLD, Mode, Movement, Role, Touch};
 use crate::hud::{HudAtlas, HudBatch, rgba};
 use std::time::{Duration, Instant};
@@ -344,49 +344,37 @@ impl Touch {
         pen.disc(knob, KNOB / 2.0 - 1.0, lit);
     }
 
-    /// The menu fingers' marks: the ring filling under a finger whose hold will do something, full
-    /// while a stack's half waits for the lift, or toward a painting finger's next item with the
-    /// loupe's plate above it, and the drop hint above a finger that would throw a stack.
+    /// The pointer's marks: the ring filling under a finger whose hold will do something, full
+    /// while a stack's half waits for the lift, and the drop hint above a finger that would throw
+    /// a stack.
     fn draw_menu(&self, pen: &mut Pen<'_>, now: Instant) {
-        let (carrying, shifted) = (self.context.carrying, self.menus.shift.active());
-        for finger in &self.fingers {
-            match &finger.role {
-                Role::Menu(Gesture::Pending {
-                    landed,
-                    from,
-                    here,
-                    held: false,
-                }) if hold_rings(here, carrying, shifted) => {
-                    pen.ring(
-                        *from,
-                        now.duration_since(*landed),
-                        hold_time(here, carrying),
-                    );
-                }
-                // Full: the half is taken when the finger lifts.
-                Role::Menu(Gesture::Splitting { from, .. }) => {
-                    pen.ring(*from, MENU_HOLD, MENU_HOLD)
-                }
-                Role::Menu(Gesture::Painting(paint)) => {
-                    if let Some((at, held, wait)) = paint.ring(now) {
-                        pen.ring(at, held, wait);
-                    }
-                    // The game draws the slot's stack over it (`Touch::loupe`).
-                    if let Some(loupe) = paint.loupe(pen.layout) {
-                        pen.plate(loupe.square, false);
-                    }
-                }
-                Role::Menu(
-                    Gesture::Pressing {
-                        outside: Some(at), ..
-                    }
-                    | Gesture::Dropping { outside: Some(at) },
-                ) => {
-                    let hint = pen.layout.above([at[0] as f32, at[1] as f32]);
-                    pen.button(hint, false, DROP, Turn::Up);
-                }
-                _ => {}
+        let Pointer::Single { gesture, .. } = &self.menus.pointer else {
+            return;
+        };
+        let carrying = self.context.carrying;
+        match gesture {
+            Gesture::Pending {
+                landed,
+                from,
+                here,
+                held: false,
+            } if hold_rings(here, carrying) => {
+                pen.ring(
+                    *from,
+                    now.duration_since(*landed),
+                    hold_time(here, carrying),
+                );
             }
+            // Full: the half is taken when the finger lifts.
+            Gesture::Splitting { from, .. } => pen.ring(*from, MENU_HOLD, MENU_HOLD),
+            Gesture::Pressing {
+                outside: Some(at), ..
+            }
+            | Gesture::Dropping { outside: Some(at) } => {
+                let hint = pen.layout.above([at[0] as f32, at[1] as f32]);
+                pen.button(hint, false, DROP, Turn::Up);
+            }
+            _ => {}
         }
     }
 
