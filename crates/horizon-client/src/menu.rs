@@ -17,6 +17,7 @@ use crate::{
 use std::sync::Arc;
 
 mod bundle;
+pub mod deal;
 pub mod place;
 
 /// What a menu needs to know about items and recipes.
