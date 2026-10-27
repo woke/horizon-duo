@@ -12,9 +12,14 @@ golden apple, milk, honey, chorus fruit) and checks their effects, remainders an
 pick scenario middle-clicks slots (AbstractContainerScreen's cloning): a full stack in creative, from
 the hotbar and from an item tab, and nothing in survival; the suggestions scenario checks
 slash-command Tab completion on single player's connected client after a fresh launch; the touch
-scenario (CLI only) puts fingers on the inventory: a stack in hand held still on the crafting grid
-placed whole only when the finger lifts, nothing on the result or under a recipe's alternatives
-(from a finger or the mouse), and Escape hiding a recipe book that covers a narrow inventory; the no-ai scenario
+and touch-in-frame scenarios (CLI only, on the server thread and in-frame) put fingers on the
+inventory: one resting on a stack while another deals from it (a tap one item, a drag an even
+share and its preview, nothing on another item, a stroke landing after the resting finger lifts,
+nothing from a cancel, nothing from armour, nothing more once the source is emptied), and with
+the touch-sort scenario nothing while sorting is bound to a button a deal clicks with; a stack in
+hand held still on the crafting grid placed whole only when the finger lifts,
+nothing on the result or under a recipe's alternatives (from a finger or the mouse), and Escape
+hiding a recipe book that covers a narrow inventory; the no-ai scenario
 turns No AI on in a scratch game home and checks that horizon-ctl, its MCP server and the game's
 control socket all refuse.
 
@@ -541,21 +546,25 @@ def pick_scenario(d, out):
     return {'cloned': shown['item']}
 
 
-def touch_scenario(d, out):
+def touch_scenario(d, out, in_frame=False, sorting=False):
     # Launched 1068x720: GUI scale 2 leaves the recipe book beside the inventory, and the automatic
     # scale makes the GUI 356 wide, under the 379 where the open book covers it (an unfolded iPhone
-    # Duo's is 357).
+    # Duo's is 357). `sorting`: launched with Horizon Extras' sort bound to the right mouse button.
     d('click', id='singleplayer')
     if 'game' not in widgets(d):
         d('click', id='create-new-world')
     d('type', field='name', replace=True, text='Touch')
     d('click', id='create-new-world')
     d('wait_for', condition='loaded', timeout=400)
+    server = d('status')['server']
+    assert (server is None) == in_frame, ('the single player path', server)
     d('command', command='gamemode survival')
     d('command', command='clear @s')
     d('command', command='recipe give @s *')
     d('give', item='oak_log', count=3)
     d('give', item='birch_log', count=2)
+    d('give', item='stone', count=20)
+    d('command', command='item replace entity @s armor.head with minecraft:iron_helmet')
     d('wait', ticks=2)
     d('options_set', key='guiScale', value='2')
     assert d('ui')['gui_size'][0] >= 379, d('ui')['gui_size']
@@ -583,6 +592,18 @@ def touch_scenario(d, out):
     def tap(at):
         up(down(at), at)
 
+    def move(finger, at):
+        d('touch', phase='move', finger=finger, x=at[0], y=at[1])
+
+    def cancel(finger, at):
+        d('touch', phase='cancel', finger=finger, x=at[0], y=at[1])
+
+    def counts(*slots):
+        """The hand's count, then these slots', read in one reply."""
+        screen = d('screen')
+        by = {s['slot']: s for s in screen['slots']}
+        return [count(screen['carried'])] + [by[s]['count'] if by[s].get('item') else 0 for s in slots]
+
     def menu():
         """The crafting grid's first two slots, its result and the hand, read in one reply."""
         screen = d('screen')
@@ -594,7 +615,197 @@ def touch_scenario(d, out):
     def count(stack):
         return stack['count'] if stack else 0
 
-    # 1. Three logs held still on an empty grid slot change nothing until the finger lifts: a slow
+    def preview():
+        """What the slots of a drag under way show, by slot, and what stays in hand."""
+        drag = d('screen').get('drag')
+        return drag and ({s['slot']: s['count'] for s in drag['slots']}, drag['left'])
+
+    def loupe():
+        """The stack the loupe shows above a finger resting on a stack another deals from."""
+        return d('screen').get('loupe')
+
+    def slot_under(at):
+        """The slot at `at` (GUI pixels), if one is there."""
+        for w in widgets(d).values():
+            x, y, width, height = w['bounds']
+            if w['id'].startswith('slot-') and x <= at[0] < x + width and y <= at[1] < y + height:
+                return int(w['id'].removeprefix('slot-'))
+        return None
+
+    def rescale(value):
+        """Another GUI scale, and the factor GUI pixels change by."""
+        width = d('ui')['gui_size'][0]
+        d('options_set', key='guiScale', value=value)
+        return d('ui')['gui_size'][0] / width
+
+    def until(reading, want, why):
+        deadline = time.time() + 2
+        while reading() != want:
+            assert time.time() < deadline, (why, reading())
+
+    # 1. One finger rests on twenty stone, and another deals from them. Its landing moves nothing;
+    # each tap puts one stone where it lifts, quick taps on one slot too (never a double click);
+    # a dealing finger held still puts one down only when it lifts; the hand stays empty.
+    stones = next(w for w in widgets(d).values() if w.get('stack') == {'item': 'minecraft:stone', 'count': 20})
+    source, source_at = int(stones['id'].removeprefix('slot-')), middle(stones['bounds'])
+    deal = lambda *slots: counts(source, *slots)
+    if sorting:
+        # A deal's tap clicks the right button, which sorts instead: none begins, and neither
+        # finger clicks.
+        a = down(source_at)
+        tap(slot_at(100))
+        up(a, source_at)
+        assert deal(100) == [0, 20, 0], ('sorting on the right button', deal(100))
+        d('close')
+        return {'sorting': True}
+    a = down(source_at)
+    b = down(slot_at(100))
+    assert deal(100) == [0, 20, 0], ('the second finger landed', deal(100))
+    up(b, slot_at(100))
+    assert deal(100) == [0, 19, 1], deal(100)
+    for n in (2, 3):
+        tap(slot_at(100))
+        assert deal(100) == [0, 20 - n, n], (n, deal(100))
+    b = down(slot_at(101))
+    time.sleep(1.2)
+    assert deal(101) == [0, 17, 0], ('the dealing finger rested', deal(101))
+    up(b, slot_at(101))
+    assert deal(100, 101) == [0, 16, 3, 1], deal(100, 101)
+    # Taps on another item, on the result and on the resting finger's own stack deal nothing.
+    logs_slot = next(int(w['id'].removeprefix('slot-')) for w in widgets(d).values() if w.get('stack') == oak(3))
+    for slot in (logs_slot, 200, source):
+        tap(slot_at(slot))
+        assert deal(100, 101, logs_slot) == [0, 16, 3, 1, 3], (slot, deal(100, 101, logs_slot))
+    # The resting finger lifting while the other is down: that stroke still lands.
+    b = down(slot_at(102))
+    up(a, source_at)
+    assert deal(102) == [0, 16, 0], deal(102)
+    up(b, slot_at(102))
+    assert deal(102) == [0, 15, 1], deal(102)
+    # Both lift together, the dealing finger first.
+    a = down(source_at)
+    b = down(slot_at(103))
+    up(b, slot_at(103))
+    up(a, source_at)
+    assert deal(103) == [0, 14, 1], deal(103)
+
+    # 2. A cancelled finger deals nothing: the resting one with a drag in flight, then the dealing
+    # one; the next finger deals again.
+    a = down(source_at)
+    b = down(slot_at(9))
+    move(b, slot_at(10))
+    cancel(a, source_at)
+    up(b, slot_at(10))
+    assert deal(9, 10) == [0, 14, 0, 0], ('cancelled the resting finger', deal(9, 10))
+    a = down(source_at)
+    b = down(slot_at(9))
+    cancel(b, slot_at(9))
+    assert deal(9) == [0, 14, 0], ('cancelled the dealing finger', deal(9))
+    tap(slot_at(9))
+    assert deal(9) == [0, 13, 1], deal(9)
+
+    # 3. A drag shares the stack evenly over the slots it reaches, each once, and the rest goes
+    # back to the resting finger's slot; nothing moves until it lifts.
+    b = down(slot_at(10))
+    for slot in (11, 12, 11):
+        move(b, slot_at(slot))
+    assert deal(10, 11, 12) == [0, 13, 0, 0, 0], ('mid-drag', deal(10, 11, 12))
+    assert preview() == ({10: 4, 11: 4, 12: 4}, 1), ('the preview', preview())
+    up(b, slot_at(12))
+    assert deal(10, 11, 12) == [0, 1, 4, 4, 4], deal(10, 11, 12)
+    assert preview() is None, ('the drag lifted', preview())
+    up(a, source_at)
+    assert deal() == [0, 1], deal()
+    # The grid's stone back on the source, by one-finger taps, as before the deal.
+    for slot in (100, 101, 102, 103):
+        tap(slot_at(slot))
+        tap(source_at)
+    assert deal(100, 101, 102, 103) == [0, 7, 0, 0, 0, 0], deal(100, 101, 102, 103)
+
+    # 4. A drag that reaches one slot (an empty one, then other logs) previews the whole stack
+    # going there, as its lift puts it.
+    a = down(source_at)
+    b = down(slot_at(13))
+    move(b, slot_at(logs_slot))
+    assert preview() == ({13: 7}, 0), ('one slot', preview())
+    up(b, slot_at(logs_slot))
+    up(a, source_at)
+    assert deal(13, logs_slot) == [0, 0, 7, 3], deal(13, logs_slot)
+    tap(slot_at(13))
+    tap(source_at)
+    assert deal(13) == [0, 7, 0], deal(13)
+
+    # 5. A deal from armour is refused: neither finger clicks, so the helmet stays on.
+    a = down(slot_at(500))
+    b = down(slot_at(13))
+    up(b, slot_at(13))
+    up(a, slot_at(500))
+    assert counts(500, 13) == [0, 1, 0], ('a deal from the helmet', counts(500, 13))
+
+    # 6. Something else changing the source (a command here, as a hopper, another player or the
+    # server would) shows no deal from then on: no loupe and no drag preview. The next stroke moves
+    # nothing and ends the deal, and while the resting finger stays no finger moves anything, the
+    # same stone put back or not; once it lifts, a tap is an ordinary one again.
+    stone = lambda n: {'item': 'minecraft:stone', 'count': n}
+    a = down(source_at)
+    b = down(slot_at(13))
+    assert loupe() == stone(7), loupe()
+    d('command', command=f'item replace entity @s container.{source} with minecraft:stone 5')
+    until(deal, [0, 5], 'the source changed')
+    for slot in (14, 15):
+        move(b, slot_at(slot))
+    assert (preview(), loupe()) == (None, None), ('a deal from the changed source', preview(), loupe())
+    up(b, slot_at(15))
+    assert deal(13, 14, 15) == [0, 5, 0, 0, 0], ('a stroke from the changed source', deal(13, 14, 15))
+    tap(slot_at(logs_slot))
+    assert deal(logs_slot) == [0, 5, 3], ('a tap while the resting finger stays', deal(logs_slot))
+    d('command', command=f'item replace entity @s container.{source} with minecraft:stone 7')
+    until(deal, [0, 7], 'the source put back')
+    tap(slot_at(13))
+    assert deal(13) == [0, 7, 0], ('a tap after the same stone was put back', deal(13))
+    up(a, source_at)
+    tap(slot_at(logs_slot))
+    assert deal(logs_slot) == [3, 7, 0], ('an ordinary tap once it lifted', deal(logs_slot))
+    # Past the double click, which would gather the logs rather than put them down.
+    time.sleep(0.3)
+    tap(slot_at(logs_slot))
+    assert deal(logs_slot) == [0, 7, 3], deal(logs_slot)
+
+    # 7. Another GUI scale under a finger, which moves the slots as a resize or another display
+    # does (horizon-ctl can't resize the window), ends what it was doing, clicking nothing: a long
+    # press on a stack lifted on that stack's new place takes no half, of it or of what is now
+    # where it landed; a spread puts nothing down; a deal deals nothing and shows no drag.
+    a = down(source_at)
+    time.sleep(0.8)
+    scale = rescale('3')
+    stale = slot_under((source_at[0] * scale, source_at[1] * scale))
+    assert stale is not None and stale < 36 and stale != source, ('now where the finger landed', stale)
+    d('command', command=f'item replace entity @s container.{stale} with minecraft:dirt 8')
+    until(lambda: counts(stale), [0, 8], 'the dirt arrived')
+    up(a, slot_at(source))
+    assert counts(source, stale) == [0, 7, 8], ('a long press across a relayout', counts(source, stale))
+    d('command', command=f'item replace entity @s container.{stale} with air')
+    until(lambda: counts(stale), [0, 0], 'the dirt went')
+    tap(slot_at(source))
+    finger = down(slot_at(13))
+    move(finger, slot_at(14))
+    rescale('2')
+    move(finger, slot_at(15))
+    up(finger, slot_at(15))
+    assert counts(13, 14, 15) == [7, 0, 0, 0], ('a spread across a relayout', counts(13, 14, 15))
+    tap(slot_at(source))
+    a = down(slot_at(source))
+    b = down(slot_at(13))
+    rescale('3')
+    for slot in (14, 15):
+        move(b, slot_at(slot))
+    assert preview() is None, ('a deal across a relayout', preview())
+    up(b, slot_at(15))
+    up(a, slot_at(source))
+    assert deal(13, 14, 15) == [0, 7, 0, 0, 0], ('a deal across a relayout', deal(13, 14, 15))
+    rescale('2')
+
+    # 8. Three logs held still on an empty grid slot change nothing until the finger lifts: a slow
     # tap puts the whole stack down.
     tree = widgets(d)
     logs = next(w for w in tree.values() if w.get('stack') == oak(3))
@@ -608,7 +819,7 @@ def touch_scenario(d, out):
     placed = {'100': oak(3), '101': None, '200': planks, 'hand': None}
     assert menu() == placed, menu()
 
-    # 2. Held on the result, a stack in hand changes nothing, nor at the lift.
+    # 9. Held on the result, a stack in hand changes nothing, nor at the lift.
     birches = next(w for w in widgets(d).values() if w.get('stack') == birch)
     tap(middle(birches['bounds']))
     before = dict(placed, hand=birch)
@@ -620,7 +831,7 @@ def touch_scenario(d, out):
     up(finger, at)
     assert menu() == before, menu()
 
-    # 3. A long press beyond the panel throws one item only where it lifts beyond the panel:
+    # 10. A long press beyond the panel throws one item only where it lifts beyond the panel:
     # lifted back on the grid, over another item, it changes nothing; lifted beyond, one leaves
     # the hand.
     beyond = (12, d('ui')['gui_size'][1] / 2)
@@ -637,7 +848,7 @@ def touch_scenario(d, out):
     while menu() != before:
         assert time.time() < deadline, ('lifted beyond the panel', menu())
 
-    # 4. A recipe's alternatives, open beside the wide inventory, take a held finger and a tap:
+    # 11. A recipe's alternatives, open beside the wide inventory, take a held finger and a tap:
     # nothing goes on a grid slot, and the tap only hides them.
     book = d('screen')['recipe_book']['targets']
     tap(middle(book[0]))
@@ -666,7 +877,7 @@ def touch_scenario(d, out):
         assert d('screen')['slots'] == slots and menu() == before, (right, menu())
         assert d('state')['scene'] == closed, f'the click (right: {right}) beside the alternatives hid them'
 
-    # 5. The automatic GUI scale is narrow: the open book covers the inventory and a held stack
+    # 12. The automatic GUI scale is narrow: the open book covers the inventory and a held stack
     # puts nothing under it (cancelled: a tap there would choose whatever recipe covers the slot);
     # Escape, where the touch Back button and the pad's B lead too, hides the book and leaves the
     # inventory open.
@@ -683,7 +894,7 @@ def touch_scenario(d, out):
     state = d('state')
     assert state['screen'] == 'inventory' and state['recipe_book'] == {'presentation': 'closed', 'open': False}, state
     d('close')
-    return {'narrow_gui': width}
+    return {'narrow_gui': width, 'in_frame': in_frame}
 
 
 def suggestions_scenario(d, out):
@@ -802,10 +1013,15 @@ def manage_scenario(d, out):
 
 SCENARIOS = {'survival': scenario, 'ui': ui_scenario, 'options': options_scenario, 'events': events_scenario,
              'consume': consume_scenario, 'pick': pick_scenario, 'suggestions': suggestions_scenario,
-             'manage': manage_scenario, 'touch': touch_scenario}
-# Scenarios with commands the MCP server leaves out, and their games' arguments.
-CLI_ONLY = {'touch'}
-LAUNCH = {'touch': {'width': 1068, 'height': 720, 'no-pause': True}}
+             'manage': manage_scenario, 'touch': touch_scenario,
+             'touch-in-frame': lambda d, out: touch_scenario(d, out, in_frame=True),
+             'touch-sort': lambda d, out: touch_scenario(d, out, sorting=True)}
+# Scenarios with commands the MCP server leaves out, their games' arguments and Horizon Extras.
+CLI_ONLY = {'touch', 'touch-in-frame', 'touch-sort'}
+LAUNCH = {'touch': {'width': 1068, 'height': 720, 'no-pause': True},
+          'touch-in-frame': {'width': 1068, 'height': 720, 'no-pause': True, 'in-frame': True},
+          'touch-sort': {'width': 1068, 'height': 720, 'no-pause': True}}
+EXTRAS = {'touch-sort': 'sort:true\nsortKey:key.mouse.right\n'}
 
 
 REFUSAL = "AI features are off: turn off No AI in the launcher's settings"
@@ -938,6 +1154,8 @@ def run(mode, ctl, out, resources, which='survival'):
     if which == 'setting':
         return setting_check(mode, ctl, out, resources)
     work, env = scratch(mode, resources)
+    if which in EXTRAS:
+        (work / 'horizon-extras.txt').write_text(EXTRAS[which])
     socket = work / 'c.sock'
     driver = (Cli if mode == 'cli' else Mcp)(ctl, socket, work, env)
     started = time.time()

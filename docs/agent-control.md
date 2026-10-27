@@ -282,10 +282,19 @@ turn the switch off.
   on Linux, through the CLI and MCP:
   - `survival`, `ui`, `options`, `events`, `consume`, `pick`, `suggestions`;
   - `manage`: worlds, servers, effects, books, LAN, the options pages and `confirm`;
-  - `touch` (CLI only): a stack in hand held still on the crafting grid placed whole only when the
-    finger lifts, nothing on the result or under a recipe's alternatives (from a finger or the
-    mouse), a long press beyond the panel throwing one item only where it lifts beyond it, and
-    Escape hiding a recipe book that covers a narrow inventory;
+  - `touch` and `touch-in-frame` (CLI only, on the server thread and in-frame): one finger resting
+    on a stack while another deals from it, one item a tap into the crafting grid, nothing on
+    another item, the result or the resting finger's own stack, a stroke still landing when the
+    resting finger lifts first, nothing from a cancelled finger, a drag sharing the stack evenly
+    with the rest going back (and its preview in `screen`, the whole stack for one slot, gone
+    with the lift), nothing from a finger resting on armour; a source a command changes showing
+    no loupe (`screen`'s `loupe`) and no preview, its next stroke moving nothing and no finger
+    moving anything until the resting one lifts, refill or not; a long press, a spread and a
+    deal across another GUI scale clicking nothing; a stack in hand held still on the grid placed
+    whole only when the finger lifts, nothing on the result or under a recipe's alternatives (from a finger
+    or the mouse), a long press beyond the panel throwing one item only where it lifts beyond it,
+    and Escape hiding a recipe book that covers a narrow inventory;
+  - `touch-sort` (CLI only): with the sort bound to the right mouse button, no deal begins;
   - `no-ai`: every surface refuses;
   - `setting`: Agent Control on opens the endpoint, the AI Agent page, Copy, and off closes it.
 - **`tools/launcher_mcp_e2e.py`** drives `horizon-launcher mcp`: the generated tools, `play` and

@@ -706,6 +706,33 @@ impl Game<'_> {
                 "0-8 hotbar, 9-35 inventory, 100+ crafting grid (row-major), 200 crafting result, 300+ container, 500-503 armor, 504 offhand, 600+ station"
             );
         }
+        if self.inventory_open() {
+            // A drag under way (the mouse's, or a touch deal's) as the slots preview it: what
+            // each slot it reached would hold (null: not shown) and what would stay in hand.
+            self.preview_deal();
+            if let Some(drag) = self.drag_view() {
+                let mut slots: Vec<_> = drag.slots.into_iter().collect();
+                slots.sort_unstable_by_key(|&(slot, _)| slot);
+                let slots: Vec<Value> = slots
+                    .into_iter()
+                    .map(|(slot, shown)| {
+                        json!({
+                            "slot": slot,
+                            "count": shown.map(|(count, _)| count),
+                            "capped": shown.is_some_and(|(_, capped)| capped),
+                        })
+                    })
+                    .collect();
+                v["drag"] = json!({ "slots": slots, "left": drag.left });
+            }
+            // The stack a touch deal's loupe shows above the finger resting on its source.
+            if let Some(layout) = self.touch_layout()
+                && let Some((_, stack, count)) = self.deal_loupe(&layout)
+            {
+                v["loupe"] = self.stack_value(&ItemStack { count, ..stack });
+            }
+        }
+
         v
     }
 

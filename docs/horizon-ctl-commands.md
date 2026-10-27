@@ -34,7 +34,7 @@ Every command `horizon-ctl` takes, its MCP tool in `horizon-ctl mcp` (the launch
 | `blocks X1 Y1 Z1 X2 Y2 Z2` | `blocks` | The non-air blocks of a box, with counts per block | `x1` (integer, required): corner X<br>`y1` (integer, required): corner Y<br>`z1` (integer, required): corner Z<br>`x2` (integer, required): opposite X<br>`y2` (integer, required): opposite Y<br>`z2` (integer, required): opposite Z |
 | `find-block BLOCK [RADIUS]` | `find_block` | The nearest loaded blocks of a kind | `block` (string, required): block id such as oak_log<br>`radius` (integer): search radius (default 32) |
 | `inventory` | `inventory` | Hotbar, main inventory, armor, offhand, carried stack and item counts | none |
-| `screen` | `screen` | The open screen or title menu, its buttons and its slots | none |
+| `screen` | `screen` | The open screen or title menu, its buttons and its slots, a drag under way as the slots preview it, and a touch deal's loupe | none |
 | `messages [N]` | `messages` | Recent chat and system messages, the title and the action bar | `n` (integer): how many chat lines (default 20) |
 | `menu` | CLI only | The open menu's slots and carried stack, with station details | none |
 
