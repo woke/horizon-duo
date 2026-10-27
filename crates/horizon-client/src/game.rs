@@ -159,6 +159,7 @@ mod titles;
 mod tnt;
 mod totem;
 mod touch;
+mod touch_deal;
 mod trading;
 mod trial_spawner;
 mod trial_visuals;
@@ -1127,9 +1128,12 @@ impl PackResources {
 }
 /// A quick craft drag as the screen draws it: each dragged slot's count and
 /// whether the slot caps it (None: hidden), and what stays in hand.
+#[derive(Clone)]
 struct DragView {
     slots: HashMap<usize, Option<(u32, bool)>>,
     left: Option<u32>,
+    /// What the dragged slots show some of: the carried stack, or a touch deal's source.
+    stack: ItemStack,
 }
 /// Ctrl+Q reads the physical keyboard, independently of sprint key mappings.
 /// A chunk whose ticking future can complete (`ChunkMap.prepareTickingChunk`):
@@ -1390,6 +1394,8 @@ struct Game<'a> {
     /// While the touch controls hold Shift down: whether a keyboard already held it, in `keys`
     /// and in `physical_keys`, so it stays held when touch lets go.
     touch_shift: Option<(bool, bool)>,
+    /// The two-finger deal the touch controls began.
+    touch_deal: Option<touch_deal::TouchDeal>,
     /// Open container block entity, if any.
     container: Option<(i32, i32, i32)>,
     /// Open workstation menu (enchanting table, anvil, ...).
@@ -4896,15 +4902,15 @@ impl Game<'_> {
         x: f32,
         y: f32,
     ) {
-        let (stack, capped) = match drag.and_then(|d| d.slots.get(&slot)) {
-            Some(None) => return,
-            Some(Some((count, capped))) => {
+        let (stack, capped) = match drag.and_then(|d| Some((d, d.slots.get(&slot)?))) {
+            Some((_, None)) => return,
+            Some((drag, Some((count, capped)))) => {
                 batch.fill(&self.gui.atlas, x, y, 16.0, 16.0, rgba(255, 255, 255, 128));
-                let carried = self
-                    .carried
-                    .clone()
-                    .map(|c| ItemStack { count: *count, ..c });
-                (carried, *capped)
+                let shown = ItemStack {
+                    count: *count,
+                    ..drag.stack.clone()
+                };
+                (Some(shown), *capped)
             }
             None => (stack, false),
         };
@@ -4929,9 +4935,13 @@ impl Game<'_> {
         let (x, y) = self.carried_anchor();
         self.draw_item(batch, &stack, x - 8.0, y - 8.0);
     }
-    /// The quick craft drag in progress, as the menu engine previews it.
+    /// The quick craft drag in progress, as the menu engine previews it, or a touch deal's.
     fn drag_view(&mut self) -> Option<DragView> {
+        if let Some(view) = self.deal_preview() {
+            return Some(view);
+        }
         let (ty, slots) = self.inv.drag.clone()?;
+        let stack = self.carried.clone()?;
         let mut view = None;
         self.menu_session(|menu, env, to_menu| {
             let menu_slots: Option<Vec<usize>> = slots.iter().map(|&g| to_menu(g)).collect();
@@ -4941,12 +4951,14 @@ impl Game<'_> {
                     DragView {
                         slots,
                         left: Some(left),
+                        stack: stack.clone(),
                     }
                 }
                 // A single dragged slot is hidden.
                 None => DragView {
                     slots: slots.iter().map(|&g| (g, None)).collect(),
                     left: None,
+                    stack: stack.clone(),
                 },
             };
             view = Some(shown);
@@ -5001,6 +5013,7 @@ impl Game<'_> {
         hud_layout::paint(batch, &self.gui.atlas, &draws);
     }
     fn hud(&mut self, size: [u32; 2]) -> HudBatch {
+        self.preview_deal();
         // The pack prompt replaces the connecting screen (setScreen), but
         // in game it opens over the world.
         let mut batch = if self.server_packs.prompt.is_some() && self.player.is_none() {
@@ -12063,6 +12076,7 @@ impl<'a> Game<'a> {
             screens_opened: 0,
             tweaks: Default::default(),
             touch_shift: None,
+            touch_deal: None,
             container: None,
             station: None,
             potions: Default::default(),

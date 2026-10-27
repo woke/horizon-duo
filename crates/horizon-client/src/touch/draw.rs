@@ -100,6 +100,10 @@ const DROP: Icon = &[
     "..........",
     "##########",
 ];
+/// A deal took nothing here.
+const CROSS: Icon = &[
+    "##....##", "###..###", ".######.", "..####..", "..####..", ".######.", "###..###", "##....##",
+];
 const PAUSE: Icon = &["##..##", "##..##", "##..##", "##..##", "##..##", "##..##"];
 /// A speech bubble.
 const CHAT: Icon = &[
@@ -345,9 +349,17 @@ impl Touch {
     }
 
     /// The pointer's marks: the ring filling under a finger whose hold will do something, full
-    /// while a stack's half waits for the lift, and the drop hint above a finger that would throw
-    /// a stack.
+    /// while a stack's half waits for the lift, the drop hint above a finger that would throw a
+    /// stack, the loupe's plate above a finger resting on a stack another deals from (the game
+    /// draws the stack over it), and a cross where a deal took nothing.
     fn draw_menu(&self, pen: &mut Pen<'_>, now: Instant) {
+        if let Some(at) = self.menus.refusal(now) {
+            let hint = pen.layout.above([at[0] as f32, at[1] as f32]);
+            pen.button(hint, false, CROSS, Turn::Up);
+        }
+        if let Some(square) = self.deal_view(pen.layout).and_then(|view| view.loupe) {
+            pen.plate(square, false);
+        }
         let Pointer::Single { gesture, .. } = &self.menus.pointer else {
             return;
         };

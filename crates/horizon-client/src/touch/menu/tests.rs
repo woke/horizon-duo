@@ -79,7 +79,7 @@ fn spot(spot: Spot) -> Here {
 fn gesture(touch: &Touch) -> Option<&Gesture> {
     match &touch.menus.pointer {
         Pointer::Single { gesture, .. } => Some(gesture),
-        Pointer::Idle => None,
+        _ => None,
     }
 }
 
@@ -1400,3 +1400,5 @@ fn wheel_lines_keep_the_remainder_both_ways() {
     assert_eq!(wheel_lines(&mut rest, -50.0, 20.0), -2);
     assert_eq!(rest, -5.0);
 }
+
+mod deal;

@@ -7,6 +7,10 @@ use super::layout::{Button, Layout};
 use super::{AWAY, DOUBLE_TAP, Input, Mode, Role, Touch};
 use std::time::{Duration, Instant};
 
+mod deal;
+pub use deal::{Deal, DealView, Dealt, Share, SlotPoint};
+use deal::{Dealing, REFUSAL};
+
 /// A menu finger held still this long is the right button. Longer than play's hold, which
 /// splits a stack under a finger resting to read its tooltip: half a second, iOS's own long
 /// press.
@@ -111,6 +115,9 @@ pub(super) enum Gesture {
     },
     /// A long press clicked already, or did all it will: lifting only hovers away.
     Done,
+    /// A refused or ended deal: the resting finger only hovers, and new fingers, including
+    /// Shift, stay spent until it lifts. Back may still leave the menu.
+    EndedDeal,
 }
 
 /// What a menu finger's button is down for.
@@ -331,12 +338,28 @@ impl Touch {
     ) -> Role {
         let px = [at[0] as f32, at[1] as f32];
         if self.context.mode == Mode::Menu && layout.on(Button::Back, px) {
+            if let Pointer::Dealing(_) = self.menus.pointer {
+                self.let_go_pointer(out);
+            }
             out.push(Input::Back);
             return Role::Spent;
         }
         if self.context.slots && layout.on(Button::Shift, px) {
+            // A deal ignores Shift: a finger on it is one too many, and the latch stays as it was.
+            if let Pointer::Asking { .. }
+            | Pointer::Dealing(_)
+            | Pointer::Single {
+                gesture: Gesture::EndedDeal,
+                ..
+            } = self.menus.pointer
+            {
+                return Role::Spent;
+            }
             self.menus.shift.tap(now);
             return Role::Shift;
+        }
+        if let Some(role) = self.land_deal(finger, at, here, out) {
+            return role;
         }
         // A desk has one mouse.
         if !matches!(self.menus.pointer, Pointer::Idle) {
@@ -365,13 +388,13 @@ impl Touch {
         out: &mut Vec<Input>,
     ) {
         let mut pointer = std::mem::take(&mut self.menus.pointer);
-        if let Pointer::Single {
-            finger: pointing,
-            gesture,
-        } = &mut pointer
-            && *pointing == finger
-        {
-            self.slide_gesture(layout, gesture, at, here, out);
+        match &mut pointer {
+            Pointer::Single {
+                finger: pointing,
+                gesture,
+            } if *pointing == finger => self.slide_gesture(layout, gesture, at, here, out),
+            Pointer::Dealing(deal) => deal.slide(finger, at, &here, layout),
+            _ => {}
         }
         self.menus.pointer = pointer;
     }
@@ -469,6 +492,7 @@ impl Touch {
         finger: u64,
         at: [f64; 2],
         here: Here,
+        now: Instant,
         out: &mut Vec<Input>,
     ) {
         match std::mem::take(&mut self.menus.pointer) {
@@ -476,6 +500,7 @@ impl Touch {
                 finger: pointing,
                 gesture,
             } if pointing == finger => self.lift_gesture(layout, gesture, at, here, out),
+            Pointer::Dealing(deal) => self.lift_deal(deal, finger, at, &here, layout, now, out),
             pointer => self.menus.pointer = pointer,
         }
     }
@@ -572,7 +597,7 @@ impl Touch {
                 click(out, MouseButton::Right, true)
             }
             Gesture::Dropping { .. } => {}
-            Gesture::Scrolling { .. } | Gesture::Done => {}
+            Gesture::Scrolling { .. } | Gesture::Done | Gesture::EndedDeal => {}
         }
         out.push(Input::Pointer(AWAY));
     }
@@ -624,14 +649,19 @@ impl Touch {
                 finger: pointing,
                 gesture,
             } if pointing == finger => let_go(gesture, out),
+            Pointer::Dealing(deal) => self.cancel_deal(deal, finger, out),
             pointer => self.menus.pointer = pointer,
         }
     }
 
-    /// The pointer lets go of what its finger does: the scene changed under it.
+    /// The pointer lets go of what its fingers do, clicking nothing: the scene changed under them,
+    /// or Back leaves it.
     pub(super) fn let_go_pointer(&mut self, out: &mut Vec<Input>) {
-        if let Pointer::Single { gesture, .. } = std::mem::take(&mut self.menus.pointer) {
-            let_go(gesture, out);
+        match std::mem::take(&mut self.menus.pointer) {
+            Pointer::Single { gesture, .. } => let_go(gesture, out),
+            Pointer::Asking { .. } => out.push(Input::Pointer(AWAY)),
+            Pointer::Dealing(deal) => out.push(Input::Deal(Deal::End { deal: deal.id() })),
+            Pointer::Idle => {}
         }
     }
 
@@ -692,10 +722,23 @@ pub(super) struct Menus {
     pub(super) pointer: Pointer,
     /// Where the last menu finger lifted.
     rest: Option<[f64; 2]>,
+    /// The deals begun so far, which number them.
+    deals: u64,
+    /// Where and when the last deal took nothing.
+    refused: Option<([f64; 2], Instant)>,
+}
+
+impl Menus {
+    /// Where a deal took nothing a moment before `now`: a cross shows there.
+    pub(super) fn refusal(&self, now: Instant) -> Option<[f64; 2]> {
+        self.refused
+            .filter(|&(_, at)| now.duration_since(at) < REFUSAL)
+            .map(|(point, _)| point)
+    }
 }
 
 /// The menu fingers that are the mouse, and what they do. One finger at a time, as a desk has one
-/// mouse: a finger it doesn't follow does nothing until it lifts.
+/// mouse, but for a deal's two: a finger it doesn't follow does nothing until it lifts.
 #[derive(Debug, Default)]
 pub(super) enum Pointer {
     #[default]
@@ -704,6 +747,14 @@ pub(super) enum Pointer {
         finger: u64,
         gesture: Gesture,
     },
+    /// Another finger landed at `landed` while `finger` rests on a stack: the game is asked to
+    /// begin `deal` (`Deal::Begin`) and answers before the next event.
+    Asking {
+        finger: u64,
+        landed: [f64; 2],
+        deal: Dealing,
+    },
+    Dealing(Dealing),
 }
 
 #[cfg(test)]

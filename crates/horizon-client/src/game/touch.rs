@@ -9,8 +9,8 @@ use horizon_client::{
     hud::HudBatch,
     keymapping::{SNEAK, SPRINT},
     touch::{
-        self as fingers, Context, Function, Here, Input, Layout, Mode, Phase, SlotKind, SlotSpot,
-        Spot, TouchEvent,
+        self as fingers, Context, Dealt, Function, Here, Input, Layout, Mode, Phase, SlotKind,
+        SlotSpot, Spot, TouchEvent,
     },
     widgets::{self, Kind},
 };
@@ -98,7 +98,7 @@ fn touch_event(touch: &Touch, here: Here) -> TouchEvent {
 }
 
 impl Game<'_> {
-    fn touch_layout(&self) -> Option<Layout> {
+    pub(super) fn touch_layout(&self) -> Option<Layout> {
         let r = self.renderer.as_ref()?;
         let scale = self.window.as_ref()?.scale_factor();
         Some(Layout::new(r.config.width, r.config.height, scale))
@@ -157,7 +157,7 @@ impl Game<'_> {
 
     /// The first that claims the point on an inventory: creative's tabs (beyond the panel, but
     /// theirs), trash and scrollbar, then beyond the panel (as `Target::of` has it), a slot.
-    fn inventory_spot(&mut self, batch: &HudBatch, p: (f32, f32)) -> Option<Spot> {
+    pub(super) fn inventory_spot(&mut self, batch: &HudBatch, p: (f32, f32)) -> Option<Spot> {
         if self.screen == Screen::Creative {
             let (ox, oy) = Self::creative_origin(batch);
             let on_tab = self.creative_screen.tabs.iter().any(|t| {
@@ -202,30 +202,46 @@ impl Game<'_> {
         }))
     }
 
-    /// The mouse's `button` clicked at `at` (physical pixels): moved there, pressed and released.
-    fn touch_click(
+    /// `button` pressed at the first of `points` (physical pixels), carried over the others and
+    /// released at the last: a click, or vanilla's drag. A fresh press, never a double click.
+    pub(super) fn touch_press(
         &mut self,
         event_loop: &ActiveEventLoop,
         id: WindowId,
         device_id: DeviceId,
-        at: [f64; 2],
+        points: &[[f64; 2]],
         button: MouseButton,
     ) {
+        let Some((first, rest)) = points.split_first() else {
+            return;
+        };
+        self.inv.last_click = None;
         let input = |state| WindowEvent::MouseInput {
             device_id,
             state,
             button,
         };
-        for event in [
-            WindowEvent::CursorMoved {
-                device_id,
-                position: PhysicalPosition::new(at[0], at[1]),
-            },
-            input(ElementState::Pressed),
-            input(ElementState::Released),
-        ] {
-            self.window_event(event_loop, id, event);
+        self.touch_pointer(event_loop, id, device_id, *first);
+        self.window_event(event_loop, id, input(ElementState::Pressed));
+        for &at in rest {
+            self.touch_pointer(event_loop, id, device_id, at);
         }
+        self.window_event(event_loop, id, input(ElementState::Released));
+    }
+
+    /// The mouse pointer moved to `at` (physical pixels).
+    pub(super) fn touch_pointer(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: WindowId,
+        device_id: DeviceId,
+        at: [f64; 2],
+    ) {
+        let moved = WindowEvent::CursorMoved {
+            device_id,
+            position: PhysicalPosition::new(at[0], at[1]),
+        };
+        self.window_event(event_loop, id, moved);
     }
 
     /// A touch drag's stack put down at `at` (physical pixels): a left click there while the
@@ -240,8 +256,7 @@ impl Game<'_> {
         if self.carried.is_none() {
             return;
         }
-        self.inv.last_click = None;
-        self.touch_click(event_loop, id, device_id, at, MouseButton::Left);
+        self.touch_press(event_loop, id, device_id, &[at], MouseButton::Left);
     }
 
     /// Where the carried stack is drawn (`draw_carried`): under the pointer, or, while a touch
@@ -313,6 +328,14 @@ impl Game<'_> {
         let mut changed = false;
         for input in inputs {
             let input = match input {
+                // Answered at once, also when it can't be dealt: then nothing was clicked.
+                Input::Deal(deal) => {
+                    let allowed = !busy && !changed;
+                    let answer = self.touch_deal(event_loop, id, device_id, &deal, allowed);
+                    self.touch.dealt(&deal, answer, Instant::now());
+                    changed |= self.scene() != before;
+                    continue;
+                }
                 Input::Release(button) if changed => Input::Abort(button),
                 Input::Press { .. } | Input::PutDown(_) | Input::Wheel(_) | Input::Function(_)
                     if changed =>
@@ -379,6 +402,8 @@ impl Game<'_> {
                     self.inventory_put_down(event_loop, id, device_id, at);
                     Ok(())
                 }
+                // Answered before the filters above.
+                Input::Deal(_) => Ok(()),
                 Input::Shift(down) => {
                     self.touch_shift(down);
                     Ok(())
@@ -525,6 +550,7 @@ impl Game<'_> {
             let sneaking = self.toggles.is_down(SNEAK);
             self.touch
                 .draw(batch, &self.gui.atlas, &layout, sneaking, Instant::now());
+            self.draw_deal_loupe(batch, &layout);
         }
     }
 
@@ -591,6 +617,7 @@ impl Loading {
                 }
                 Input::Wheel(lines) => self.menu_wheel(lines),
                 Input::Keyboard => self.request_keyboard(),
+                Input::Deal(deal) => self.touch.dealt(&deal, Dealt::Refused, Instant::now()),
                 // Nothing of a world or an inventory is on the title screen.
                 Input::Shift(_)
                 | Input::PutDown(_)

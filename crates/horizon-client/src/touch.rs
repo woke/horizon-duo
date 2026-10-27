@@ -28,7 +28,9 @@ mod menu;
 pub use functions::{Function, Shown};
 use keys::Keys;
 pub use layout::{Button, Cell, Layout};
-pub use menu::{Here, MouseButton, SlotKind, SlotSpot, Spot};
+pub use menu::{
+    Deal, DealView, Dealt, Here, MouseButton, Share, SlotKind, SlotPoint, SlotSpot, Spot,
+};
 
 /// A finger held still on the view this long mines, or uses the held item.
 const HOLD: Duration = Duration::from_millis(300);
@@ -142,6 +144,8 @@ pub enum Input {
     /// If the hand holds a stack now, a left click at this point (physical pixels): a dragged
     /// stack put down, or what that leaves in hand put back where it came from. Never a result.
     PutDown([f64; 2]),
+    /// A two-finger deal from a stack, answered at once (`Touch::dealt`).
+    Deal(Deal),
     /// A tap focused a text field: the system keyboard is wanted.
     Keyboard,
     /// Mouse movement turning the view.
@@ -298,7 +302,7 @@ impl Touch {
             (Phase::End, Some(i)) => {
                 let finger = self.fingers.remove(i);
                 match finger.role {
-                    Role::Menu => self.lift_menu(layout, id, at, here, &mut out),
+                    Role::Menu => self.lift_menu(layout, id, at, here, now, &mut out),
                     Role::Function(control) => {
                         self.lift_function(layout, control, at, now, &mut out)
                     }

@@ -142,7 +142,7 @@ impl Menu {
     /// stores. Not a bundle, whose clicks move items in and out of it; not armour, the off hand or
     /// a mount's equipment, whose changes equip; not a station's input, whose change resets what
     /// the station does (a stonecutter's chosen recipe, a furnace's progress).
-    fn deals_from(&self, env: &Env, s: usize) -> bool {
+    pub fn deals_from(&self, env: &Env, s: usize) -> bool {
         let Some(slot) = self.slots.get(s) else {
             return false;
         };

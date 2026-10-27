@@ -374,12 +374,15 @@ impl Game<'_> {
     pub(super) fn sort_mouse_press(&mut self, button: MouseButton) -> bool {
         self.sort_input(&keybinds::mouse_name(button))
     }
-    fn sort_input(&mut self, name: &str) -> bool {
+    /// The sort is bound to the key or mouse button named `name`: its press sorts instead.
+    pub(super) fn sort_bound_to(&self, name: &str) -> bool {
         let e = &self.settings.extras;
+        e.sort && e.sort_key == name
+    }
+    fn sort_input(&mut self, name: &str) -> bool {
         // A book taking the pointer leaves the slots out of reach: hidden under it, or behind
         // its alternatives.
-        if !e.sort
-            || e.sort_key != name
+        if !self.sort_bound_to(name)
             || self.recipe_search_focused()
             || self.recipe_book_takes_pointer()
         {
